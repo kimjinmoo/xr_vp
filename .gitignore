@@ -1,0 +1,36 @@
+# Built artifacts
+bin
+build
+out
+.gradle
+reports
+
+# Android Studio / IntelliJ IDEA
+.idea
+*.iml
+*.iws
+*.ipr
+/captures
+/atrace_logs
+.externalNativeBuild
+.cxx
+
+# Local configuration files
+local.properties
+.env
+.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Kotlin
+.kotlin
+
+# Log files
+*.log
+
+# Gradle
+.gradle
+gradle-app.setting
+!gradle-wrapper.jar
