@@ -34,6 +34,26 @@ The project follows an MVVM-like pattern:
   - Running `./gradlew test` for unit tests.
   - Running `./gradlew lint` or `ktlint` if available.
 
+## Library & Version Management Policy
+- **Version Catalog Usage**: All dependencies must be managed via `gradle/libs.versions.toml`. Hardcoding versions in `build.gradle.kts` is strictly prohibited.
+- **Stable Versions Preference**: Prefer stable versions for core libraries. Alpha/Beta versions are allowed only for cutting-edge features like Android XR.
+- **Core Library Baseline (as of 2026-03-03)**:
+  - **Kotlin**: 2.0.21+
+  - **Android Gradle Plugin (AGP)**: 8.13.2+
+  - **Media3**: 1.9.2+ (Core playback engine)
+  - **Compose BOM**: 2026.02.00+
+  - **Android XR (Spatial)**: 1.0.0-alpha10 (Maintain until stable release)
+  - **jcifs-ng**: 2.1.10+ (SMB streaming)
+- **Dependency Updates**: When updating libraries, verify API compatibility (e.g., Media3 `C` class constants) and perform full regression testing on both 2D and Spatial modes.
+
+## Documentation & Commenting Policy
+- **KDoc for All Functions**: Every function (including private ones and Composable functions) must have a KDoc comment explaining its purpose, parameters, and return value.
+- **Import Cleanup**: Unused imports must be removed immediately. Maintain a minimal and clean import section.
+- **Implementation Details**: Complex logic within methods should be documented with inline comments explaining the "why" rather than just the "what."
+- **Codebase Navigation**: Use `// MARK:` or equivalent section headers in large files to improve navigability.
+- **Language**: All technical documentation and comments must be in Korean for clarity within the team, while maintaining English for standard programming terms.
+- **No Redundancy**: Avoid obvious comments that repeat what the code clearly expresses.
+
 ## Guidelines for Gemini CLI
 - **Contextual Awareness**: Always check `SmbDataSource` when troubleshooting network playback issues.
 - **UI Consistency**: Use Material 3 components and maintain the established `VPTheme`.
