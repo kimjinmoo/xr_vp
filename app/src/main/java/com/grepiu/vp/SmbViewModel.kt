@@ -140,7 +140,17 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
      * @return 인증 정보가 포함된 Uri.
      */
     fun getFileUri(item: SmbItem): Uri {
-        val smbPath = Uri.parse(item.path).path ?: ""
+        // item.path는 "smb://192.168.0.10/share/file#1.mp4" 형태임.
+        // Uri.parse(item.path).path를 사용하면 '#' 이후가 fragment로 취급되어 유실됨.
+        // 따라서 서버 주소 이후의 모든 문자열을 경로로 직접 추출함.
+        val prefix = "smb://$serverIp"
+        val smbPath = if (item.path.startsWith(prefix)) {
+            item.path.substring(prefix.length)
+        } else {
+            // 서버 IP가 매칭되지 않을 경우를 대비한 대체 로직
+            val uri = Uri.parse(item.path)
+            (uri.path ?: "") + (uri.fragment?.let { "#$it" } ?: "")
+        }
         return smbService.getAuthenticatedUri(serverIp, username, password, smbPath)
     }
 

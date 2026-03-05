@@ -1,6 +1,7 @@
 package com.grepiu.vp
 
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
@@ -39,10 +40,14 @@ class SmbDataSource : BaseDataSource(true) {
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
         prop.setProperty("jcifs.smb.client.disableSMB1", "false") // 레거시 호환성을 위해 유지
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
+        // DFS 기능을 비활성화하여 'The network name cannot be found' 오류 방지
+        prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
     }
+
+    private var dataSpec: DataSpec? = null
 
     /**
      * 데이터 소스를 오픈함. URI에서 인증 정보를 추출하고 SMB 파일 스트림을 준비함.
@@ -52,32 +57,64 @@ class SmbDataSource : BaseDataSource(true) {
      * @throws IOException SMB 연결 또는 파일 접근 실패 시 발생.
      */
     override fun open(dataSpec: DataSpec): Long {
+        this.dataSpec = dataSpec
         uri = dataSpec.uri
         transferInitializing(dataSpec)
 
         return try {
-            // URI에서 사용자 정보(아이디:비밀번호) 추출 및 디코딩
-            val userInfo = uri?.userInfo
+            // URI에서 사용자 정보(아이디:비밀번호) 추출
+            val encodedUserInfo = uri?.encodedUserInfo
             val context: CIFSContext
-            val cleanUrl: String
+            val smbFile: SmbFile
             
-            if (userInfo != null) {
-                val userPass = URLDecoder.decode(userInfo, "UTF-8").split(":", limit = 2)
+            if (!encodedUserInfo.isNullOrBlank()) {
+                val decodedUserInfo = URLDecoder.decode(encodedUserInfo, "UTF-8")
+                val userPass = decodedUserInfo.split(":", limit = 2)
                 val username = userPass[0]
                 val password = if (userPass.size > 1) userPass[1] else ""
-                
+
                 val auth = NtlmPasswordAuthenticator(null, username, password)
                 context = createCifsContext().withCredentials(auth)
-                // 인증 정보를 제외한 순수 호스트 정보로 URL 재구성
-                cleanUrl = "smb://${uri?.host}${if (uri?.port != -1) ":${uri?.port}" else ""}${uri?.path}"
+
+                val host = uri?.host ?: ""
+                val port = if (uri?.port != -1) ":${uri?.port}" else ""
+
+                // '#' 문자가 포함된 파일명을 안전하게 처리하기 위해 부모 디렉토리와 파일명을 분리함
+                val fullPath = uri?.path ?: ""
+                val lastSlashIndex = fullPath.lastIndexOf('/')
+
+                if (lastSlashIndex >= 0) {
+                    val parentPath = fullPath.substring(0, lastSlashIndex + 1)
+                    val fileName = fullPath.substring(lastSlashIndex + 1)
+
+                    val parentUrl = "smb://$host$port$parentPath"
+                    val parentFile = SmbFile(parentUrl, context)
+                    smbFile = SmbFile(parentFile, fileName)
+                    Log.d("[parentFile]", parentFile.toString())
+                } else {
+                    smbFile = SmbFile("smb://$host$port$fullPath", context)
+                }
             } else {
                 context = createCifsContext()
-                cleanUrl = uri.toString()
+                // 인증 정보가 없는 경우에도 동일한 로직 적용 시도
+                val fullPath = uri?.path ?: ""
+                val lastSlashIndex = fullPath.lastIndexOf('/')
+                val host = uri?.host ?: ""
+                val port = if (uri?.port != -1) ":${uri?.port}" else ""
+
+                if (lastSlashIndex >= 0) {
+                    val parentPath = fullPath.substring(0, lastSlashIndex + 1)
+                    val fileName = fullPath.substring(lastSlashIndex + 1)
+                    val parentFile = SmbFile("smb://$host$port$parentPath", context)
+                    Log.d("[parentFile]", parentFile.toString())
+                    smbFile = SmbFile(parentFile, fileName)
+                } else {
+                    smbFile = SmbFile(uri.toString(), context)
+                }
             }
 
-            val smbFile = SmbFile(cleanUrl, context)
             if (!smbFile.exists()) {
-                throw IOException("File does not exist: $cleanUrl")
+                throw IOException("File does not exist: ${smbFile.canonicalPath}")
             }
             
             val fileLength = smbFile.length()
@@ -113,6 +150,8 @@ class SmbDataSource : BaseDataSource(true) {
             transferStarted(dataSpec)
             bytesToRead
         } catch (e: Exception) {
+            // 실패 시 dataSpec을 null로 초기화하여 close 시 transferEnded 호출 방지
+            this.dataSpec = null
             throw IOException("SMB Open Error: ${e.message}", e)
         }
     }
@@ -131,12 +170,13 @@ class SmbDataSource : BaseDataSource(true) {
         if (bytesToRead == 0L) return C.RESULT_END_OF_INPUT
 
         val bytesToReadThisTime = min(bytesToRead, length.toLong()).toInt()
-        val read = inputStream?.read(buffer, offset, bytesToReadThisTime) ?: -1
+        val read = try {
+            inputStream?.read(buffer, offset, bytesToReadThisTime) ?: -1
+        } catch (e: IOException) {
+            throw e
+        }
         
         if (read == -1) {
-            if (bytesToRead != C.LENGTH_UNSET.toLong() && bytesToRead > 0) {
-                throw IOException("Unexpected EOF: expected $bytesToRead more bytes")
-            }
             return C.RESULT_END_OF_INPUT
         }
 
@@ -164,10 +204,11 @@ class SmbDataSource : BaseDataSource(true) {
             // 종료 오류는 무시함
         } finally {
             inputStream = null
-            if (uri != null) {
-                uri = null
+            if (dataSpec != null) {
                 transferEnded()
+                dataSpec = null
             }
+            uri = null
         }
     }
 }

@@ -48,7 +48,7 @@ The project follows an MVVM-like pattern:
 
 ## Documentation & Commenting Policy
 - **KDoc for All Functions**: Every function (including private ones and Composable functions) must have a KDoc comment explaining its purpose, parameters, and return value.
-- **Import Cleanup**: Unused imports must be removed immediately. Maintain a minimal and clean import section.
+- **Import Verification & Cleanup**: 코드 수정 시, 특히 새로운 Compose Modifier나 라이브러리 클래스를 추가할 때 필요한 임포트가 누락되지 않았는지 반드시 확인해야 한다. 사용되지 않는 임포트는 즉시 제거하여 최소한의 깨끗한 임포트 섹션을 유지한다.
 - **Implementation Details**: Complex logic within methods should be documented with inline comments explaining the "why" rather than just the "what."
 - **Codebase Navigation**: Use `// MARK:` or equivalent section headers in large files to improve navigability.
 - **Language**: All technical documentation and comments must be in Korean for clarity within the team, while maintaining English for standard programming terms.

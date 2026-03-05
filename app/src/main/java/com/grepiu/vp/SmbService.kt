@@ -44,6 +44,8 @@ class SmbService {
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
         prop.setProperty("jcifs.smb.client.disableSMB1", "false")
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
+        // DFS 기능을 비활성화하여 'The network name cannot be found' 오류 방지
+        prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
     }
@@ -85,11 +87,23 @@ class SmbService {
      * @return 인증 정보가 포함된 Uri.
      */
     fun getAuthenticatedUri(serverIp: String, username: String, password: String, filePath: String): Uri {
-        val userInfo = if (username.isNotBlank()) {
-            "$username:$password@"
-        } else ""
-        val cleanPath = if (filePath.startsWith("/")) filePath.substring(1) else filePath
-        return Uri.parse("smb://$userInfo$serverIp/$cleanPath")
+        val builder = Uri.Builder()
+            .scheme("smb")
+        
+        // 사용자 이름과 비밀번호를 각각 인코딩하여 authority 구성
+        if (username.isNotBlank()) {
+            val encodedUser = Uri.encode(username)
+            val encodedPass = Uri.encode(password)
+            builder.encodedAuthority("$encodedUser:$encodedPass@$serverIp")
+        } else {
+            builder.authority(serverIp)
+        }
+        
+        // 경로의 각 세그먼트를 분리하여 추가함으로써 자동 인코딩 보장
+        val segments = filePath.split("/").filter { it.isNotEmpty() }
+        segments.forEach { builder.appendPath(it) }
+        
+        return builder.build()
     }
 
     /**
