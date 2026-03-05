@@ -13,11 +13,13 @@ import java.util.Properties
 
 /**
  * SMB 서버 정보 데이터 클래스.
- * 
- * @property name 서버의 이름 또는 호스트명.
- * @property ip 서버의 IP 주소.
  */
-data class SmbServer(val name: String, val ip: String)
+data class SmbServer(
+    val name: String,
+    val ip: String,
+    val user: String = "",
+    val pass: String = ""
+)
 
 /**
  * SMB 서버 내의 개별 파일 또는 폴더 아이템 정보 데이터 클래스.

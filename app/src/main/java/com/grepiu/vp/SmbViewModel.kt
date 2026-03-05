@@ -24,9 +24,10 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("smb_prefs", Context.MODE_PRIVATE)
 
     // MARK: - UI 상태 변수
-    var serverIp by mutableStateOf(prefs.getString("last_ip", "") ?: "")
-    var username by mutableStateOf(prefs.getString("last_user", "") ?: "")
-    var password by mutableStateOf(prefs.getString("last_pass", "") ?: "")
+    var serverIp by mutableStateOf("")
+    var username by mutableStateOf("")
+    var password by mutableStateOf("")
+    var serverName by mutableStateOf("")
 
     var isConnected by mutableStateOf(false)
         private set
@@ -35,6 +36,69 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     var currentPath by mutableStateOf("")
     var isLoading by mutableStateOf(false)
     var errorMessage by mutableStateOf<String?>(null)
+
+    // 저장된 서버 목록
+    var savedServers by mutableStateOf<List<SmbServer>>(emptyList())
+        private set
+
+    var showForm by mutableStateOf(false)
+
+    init {
+        loadSavedServers()
+        // 저장된 서버가 없으면 폼을 먼저 보여줌
+        if (savedServers.isEmpty()) showForm = true
+    }
+
+    private fun loadSavedServers() {
+        val serverCount = prefs.getInt("server_count", 0)
+        val servers = mutableListOf<SmbServer>()
+        for (i in 0 until serverCount) {
+            val name = prefs.getString("server_name_$i", "") ?: ""
+            val ip = prefs.getString("server_ip_$i", "") ?: ""
+            val user = prefs.getString("server_user_$i", "") ?: ""
+            val pass = prefs.getString("server_pass_$i", "") ?: ""
+            if (ip.isNotBlank()) {
+                servers.add(SmbServer(name, ip, user, pass))
+            }
+        }
+        savedServers = servers
+    }
+
+    private fun saveServersToPrefs(servers: List<SmbServer>) {
+        prefs.edit().apply {
+            putInt("server_count", servers.size)
+            servers.forEachIndexed { i, server ->
+                putString("server_name_$i", server.name)
+                putString("server_ip_$i", server.ip)
+                putString("server_user_$i", server.user)
+                putString("server_pass_$i", server.pass)
+            }
+            apply()
+        }
+        savedServers = servers
+    }
+
+    fun addCurrentServer() {
+        if (serverIp.isBlank()) return
+        val newName = if (serverName.isBlank()) serverIp else serverName
+        val newServer = SmbServer(newName, serverIp, username, password)
+        val updatedList = savedServers.filter { it.ip != serverIp } + newServer
+        saveServersToPrefs(updatedList)
+        serverName = ""
+    }
+
+    fun removeServer(server: SmbServer) {
+        val updatedList = savedServers.filter { it != server }
+        saveServersToPrefs(updatedList)
+    }
+
+    fun selectServer(server: SmbServer) {
+        serverIp = server.ip
+        username = server.user
+        password = server.pass
+        serverName = server.name
+        connect()
+    }
 
     // MARK: - 이벤트 핸들러
     
@@ -59,11 +123,17 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun onPassChange(newPass: String) { password = newPass }
 
+    fun onNameChange(newName: String) { serverName = newName }
+
     /**
      * SMB 서버에 접속을 시도함.
      * 성공 시 접속 정보를 저장하고 루트 파일 목록을 조회함.
      */
     fun connect() {
+        if (serverIp.isBlank()) {
+            errorMessage = "IP Address is required"
+            return
+        }
         errorMessage = null
         isLoading = true
         viewModelScope.launch {
@@ -74,14 +144,6 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 
                 if (success) {
-                    // 성공 시 접속 정보 영속화
-                    prefs.edit().apply {
-                        putString("last_ip", serverIp)
-                        putString("last_user", username)
-                        putString("last_pass", password)
-                        apply()
-                    }
-                    
                     currentPath = "smb://$serverIp/"
                     val result = smbService.listFiles(currentPath)
                     if (result.isEmpty() && !currentPath.endsWith("/")) {
@@ -110,10 +172,18 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
      * 서버 연결을 종료하고 상태를 초기화함.
      */
     fun disconnect() {
-        smbService.disconnect()
-        isConnected = false
-        items = emptyList()
-        currentPath = ""
+        viewModelScope.launch {
+            isLoading = true
+            try {
+                smbService.disconnect()
+                items = emptyList()
+                currentPath = ""
+                isConnected = false
+                errorMessage = null
+            } finally {
+                isLoading = false
+            }
+        }
     }
 
     /**

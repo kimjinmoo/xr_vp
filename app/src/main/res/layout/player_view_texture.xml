@@ -7,4 +7,4 @@
     android:background="@android:color/black"
     app:keep_content_on_player_reset="true"
     app:shutter_background_color="@android:color/black"
-    app:surface_type="surface_view" />
+    app:surface_type="texture_view" />

@@ -46,6 +46,11 @@ The project follows an MVVM-like pattern:
   - **jcifs-ng**: 2.1.10+ (SMB streaming)
 - **Dependency Updates**: When updating libraries, verify API compatibility (e.g., Media3 `C` class constants) and perform full regression testing on both 2D and Spatial modes.
 
+## Coding Style & Import Policy
+- **Explicit Imports Over Full Paths**: 코드 가독성을 높이기 위해 클래스나 함수 사용 시 풀 패키지 경로(Fully Qualified Name) 대신 상단 `import`를 사용하는 것을 원칙으로 한다. 특히 Compose Modifier, Layout, UI 요소 등 자주 사용되는 객체는 반드시 임포트하여 코드를 간결하게 유지한다.
+- **Import Verification & Cleanup**: 코드 수정 시, 특히 새로운 Compose Modifier나 라이브러리 클래스를 추가할 때 필요한 임포트가 누락되지 않았는지 반드시 확인해야 한다. 사용되지 않는 임포트는 즉시 제거하여 최소한의 깨끗한 임포트 섹션을 유지한다.
+- **Grouped Imports**: 관련 있는 패키지끼리 그룹화하여 임포트 섹션을 관리하며, IDE의 자동 정렬(Optimize Imports) 기능을 적극 활용한다.
+
 ## Documentation & Commenting Policy
 - **KDoc for All Functions**: Every function (including private ones and Composable functions) must have a KDoc comment explaining its purpose, parameters, and return value.
 - **Import Verification & Cleanup**: 코드 수정 시, 특히 새로운 Compose Modifier나 라이브러리 클래스를 추가할 때 필요한 임포트가 누락되지 않았는지 반드시 확인해야 한다. 사용되지 않는 임포트는 즉시 제거하여 최소한의 깨끗한 임포트 섹션을 유지한다.

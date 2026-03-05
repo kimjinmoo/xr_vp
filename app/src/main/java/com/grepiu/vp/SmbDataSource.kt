@@ -30,18 +30,23 @@ class SmbDataSource : BaseDataSource(true) {
 
     /**
      * jcifs-ng 설정을 위한 컨텍스트 생성.
-     * SMB2 활성화 및 성능 최적화를 위한 프로퍼티를 설정함.
+     * 8K 스트리밍 성능 극대화를 위해 버퍼 및 타임아웃을 공격적으로 설정함.
      * 
      * @return 설정된 CIFSContext 객체.
      */
     private fun createCifsContext(): CIFSContext {
         val prop = Properties()
-        // 현대적인 SMB 설정을 위한 프로퍼티 추가
+        // 8K 고대역폭 대응을 위한 SMB 최적화 설정
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
-        prop.setProperty("jcifs.smb.client.disableSMB1", "false") // 레거시 호환성을 위해 유지
+        prop.setProperty("jcifs.smb.client.disableSMB1", "false")
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
-        // DFS 기능을 비활성화하여 'The network name cannot be found' 오류 방지
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
+        
+        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (기본값 대비 8배~16배)
+        prop.setProperty("jcifs.smb.client.rcv_buf_size", "1048576") // 1MB 수신 버퍼
+        prop.setProperty("jcifs.smb.client.snd_buf_size", "1048576") // 1MB 송신 버퍼
+        prop.setProperty("jcifs.smb.client.connTimeout", "5000")     // 연결 타임아웃 5초
+        prop.setProperty("jcifs.smb.client.responseTimeout", "10000") // 응답 타임아웃 10초
         
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
@@ -62,7 +67,7 @@ class SmbDataSource : BaseDataSource(true) {
         transferInitializing(dataSpec)
 
         return try {
-            // URI에서 사용자 정보(아이디:비밀번호) 추출
+            // ... (인증 처리 로직 생략)
             val encodedUserInfo = uri?.encodedUserInfo
             val context: CIFSContext
             val smbFile: SmbFile
@@ -79,24 +84,20 @@ class SmbDataSource : BaseDataSource(true) {
                 val host = uri?.host ?: ""
                 val port = if (uri?.port != -1) ":${uri?.port}" else ""
 
-                // '#' 문자가 포함된 파일명을 안전하게 처리하기 위해 부모 디렉토리와 파일명을 분리함
                 val fullPath = uri?.path ?: ""
                 val lastSlashIndex = fullPath.lastIndexOf('/')
 
                 if (lastSlashIndex >= 0) {
                     val parentPath = fullPath.substring(0, lastSlashIndex + 1)
                     val fileName = fullPath.substring(lastSlashIndex + 1)
-
                     val parentUrl = "smb://$host$port$parentPath"
                     val parentFile = SmbFile(parentUrl, context)
                     smbFile = SmbFile(parentFile, fileName)
-                    Log.d("[parentFile]", parentFile.toString())
                 } else {
                     smbFile = SmbFile("smb://$host$port$fullPath", context)
                 }
             } else {
                 context = createCifsContext()
-                // 인증 정보가 없는 경우에도 동일한 로직 적용 시도
                 val fullPath = uri?.path ?: ""
                 val lastSlashIndex = fullPath.lastIndexOf('/')
                 val host = uri?.host ?: ""
@@ -106,7 +107,6 @@ class SmbDataSource : BaseDataSource(true) {
                     val parentPath = fullPath.substring(0, lastSlashIndex + 1)
                     val fileName = fullPath.substring(lastSlashIndex + 1)
                     val parentFile = SmbFile("smb://$host$port$parentPath", context)
-                    Log.d("[parentFile]", parentFile.toString())
                     smbFile = SmbFile(parentFile, fileName)
                 } else {
                     smbFile = SmbFile(uri.toString(), context)
@@ -120,15 +120,12 @@ class SmbDataSource : BaseDataSource(true) {
             val fileLength = smbFile.length()
             val rawInputStream = smbFile.openInputStream()
             
-            // 데이터 분석(Sniffing) 시에는 skip이 매우 빈번하게 일어납니다.
-            // 효율적인 skip을 위해 원본 스트림에서 먼저 처리합니다.
             if (dataSpec.position > 0) {
                 var totalSkipped = 0L
                 while (totalSkipped < dataSpec.position) {
                     val skipped = rawInputStream.skip(dataSpec.position - totalSkipped)
                     if (skipped <= 0) {
-                        // skip이 0을 반환하면 실제로 읽어서 버리는 방식으로 대응
-                        val tempBuffer = ByteArray(min(4096, (dataSpec.position - totalSkipped).toInt()))
+                        val tempBuffer = ByteArray(min(8192, (dataSpec.position - totalSkipped).toInt()))
                         val read = rawInputStream.read(tempBuffer)
                         if (read == -1) break
                         totalSkipped += read
@@ -138,8 +135,8 @@ class SmbDataSource : BaseDataSource(true) {
                 }
             }
 
-            // 고해상도 비디오 스트리밍 성능을 위해 1MB 버퍼 적용
-            inputStream = java.io.BufferedInputStream(rawInputStream, 1024 * 1024)
+            // 8K 영상 대응을 위해 자바 I/O 버퍼를 8MB로 확장
+            inputStream = java.io.BufferedInputStream(rawInputStream, 8 * 1024 * 1024)
 
             bytesToRead = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length
@@ -150,7 +147,6 @@ class SmbDataSource : BaseDataSource(true) {
             transferStarted(dataSpec)
             bytesToRead
         } catch (e: Exception) {
-            // 실패 시 dataSpec을 null로 초기화하여 close 시 transferEnded 호출 방지
             this.dataSpec = null
             throw IOException("SMB Open Error: ${e.message}", e)
         }
