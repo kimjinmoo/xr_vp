@@ -46,7 +46,10 @@ data class UiStrings(
     val playbackError: String,
     val back: String,
     val close: String,
-    val applicationInfo: String
+    val applicationInfo: String,
+    val anonymousLogin: String,
+    val edit: String,
+    val update: String
 )
 
 val KoreanStrings = UiStrings(
@@ -92,7 +95,10 @@ val KoreanStrings = UiStrings(
     playbackError = "재생 오류",
     back = "뒤로",
     close = "닫기",
-    applicationInfo = "앱 정보"
+    applicationInfo = "앱 정보",
+    anonymousLogin = "익명 접속",
+    edit = "수정",
+    update = "수정 완료"
 )
 
 val EnglishStrings = UiStrings(
@@ -138,5 +144,8 @@ val EnglishStrings = UiStrings(
     playbackError = "Playback Error",
     back = "Back",
     close = "Close",
-    applicationInfo = "Application Info"
+    applicationInfo = "Application Info",
+    anonymousLogin = "Anonymous Login",
+    edit = "Edit",
+    update = "Update"
 )

@@ -44,9 +44,11 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
@@ -674,9 +676,13 @@ fun SmbBrowserContent(
                     TextButton(onClick = { viewModel.disconnect() }) {
                         Text(strings.disconnect, color = MaterialTheme.colorScheme.error)
                     }
-                } else if (viewModel.showForm && viewModel.savedServers.isNotEmpty()) {
-                    TextButton(onClick = { viewModel.showForm = false }) {
-                        Text(strings.savedServers)
+                } else if (viewModel.showForm) {
+                    TextButton(onClick = { viewModel.resetForm() }) {
+                        Text(strings.back)
+                    }
+                } else if (viewModel.savedServers.isNotEmpty()) {
+                    TextButton(onClick = { viewModel.showForm = true }) {
+                        Text(strings.addNew)
                     }
                 }
             }
@@ -694,12 +700,15 @@ fun SmbBrowserContent(
                         serverIp = viewModel.serverIp,
                         username = viewModel.username,
                         password = viewModel.password,
+                        isAnonymous = viewModel.isAnonymous,
+                        isEditMode = viewModel.isEditMode,
                         errorMessage = viewModel.errorMessage,
                         isLoading = viewModel.isLoading,
                         onNameChange = viewModel::onNameChange,
                         onIpChange = viewModel::onIpChange,
                         onUserChange = viewModel::onUserChange,
                         onPassChange = viewModel::onPassChange,
+                        onAnonymousChange = viewModel::onAnonymousChange,
                         onConnect = viewModel::connect,
                         onSave = viewModel::addCurrentServer,
                         modifier = Modifier.fillMaxWidth(0.7f).zIndex(1f)
@@ -709,6 +718,7 @@ fun SmbBrowserContent(
                         strings = strings,
                         servers = viewModel.savedServers,
                         onServerClick = { viewModel.selectServer(it) },
+                        onEditClick = { viewModel.editServer(it) },
                         onDeleteClick = { viewModel.removeServer(it) },
                         onAddNew = { viewModel.showForm = true }
                     )
@@ -749,6 +759,7 @@ fun SmbServerList(
     strings: UiStrings,
     servers: List<SmbServer>,
     onServerClick: (SmbServer) -> Unit,
+    onEditClick: (SmbServer) -> Unit,
     onDeleteClick: (SmbServer) -> Unit,
     onAddNew: () -> Unit
 ) {
@@ -788,6 +799,9 @@ fun SmbServerList(
                             Text(server.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
                             Text(server.ip, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        IconButton(onClick = { onEditClick(server) }) {
+                            Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.primary)
+                        }
                         IconButton(onClick = { onDeleteClick(server) }) {
                             Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
                         }
@@ -805,12 +819,15 @@ fun SmbConnectForm(
     serverIp: String,
     username: String,
     password: String,
+    isAnonymous: Boolean,
+    isEditMode: Boolean,
     errorMessage: String?,
     isLoading: Boolean,
     onNameChange: (String) -> Unit,
     onIpChange: (String) -> Unit,
     onUserChange: (String) -> Unit,
     onPassChange: (String) -> Unit,
+    onAnonymousChange: (Boolean) -> Unit,
     onConnect: () -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier
@@ -829,7 +846,7 @@ fun SmbConnectForm(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                strings.connectToServer,
+                if (isEditMode) strings.edit else strings.connectToServer,
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 fontWeight = FontWeight.Bold
@@ -851,25 +868,45 @@ fun SmbConnectForm(
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
             )
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = onUserChange,
-                    label = { Text(strings.user) },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = isAnonymous,
+                    onCheckedChange = onAnonymousChange
                 )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = onPassChange,
-                    label = { Text(strings.password) },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    shape = RoundedCornerShape(12.dp)
+                Text(
+                    text = strings.anonymousLogin,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.clickable { onAnonymousChange(!isAnonymous) }
                 )
             }
+
+            if (!isAnonymous) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = onUserChange,
+                        label = { Text(strings.user) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = onPassChange,
+                        label = { Text(strings.password) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            }
+            
             if (errorMessage != null) {
                 Text(errorMessage, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
@@ -881,16 +918,18 @@ fun SmbConnectForm(
                     shape = RoundedCornerShape(12.dp),
                     enabled = serverIp.isNotBlank()
                 ) {
-                    Text(strings.save)
+                    Text(if (isEditMode) strings.update else strings.save)
                 }
-                Button(
-                    onClick = onConnect, 
-                    modifier = Modifier.weight(1f).height(56.dp),
-                    enabled = serverIp.isNotBlank() && !isLoading,
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    if (isLoading) CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary)
-                    else Text(strings.connectNow)
+                if (!isEditMode) {
+                    Button(
+                        onClick = onConnect, 
+                        modifier = Modifier.weight(1f).height(56.dp),
+                        enabled = serverIp.isNotBlank() && !isLoading,
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        if (isLoading) CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary)
+                        else Text(strings.connectNow)
+                    }
                 }
             }
         }

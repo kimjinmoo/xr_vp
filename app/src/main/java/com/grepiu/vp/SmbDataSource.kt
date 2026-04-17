@@ -42,11 +42,17 @@ class SmbDataSource : BaseDataSource(true) {
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         
-        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (기본값 대비 8배~16배)
-        prop.setProperty("jcifs.smb.client.rcv_buf_size", "1048576") // 1MB 수신 버퍼
-        prop.setProperty("jcifs.smb.client.snd_buf_size", "1048576") // 1MB 송신 버퍼
-        prop.setProperty("jcifs.smb.client.connTimeout", "5000")     // 연결 타임아웃 5초
-        prop.setProperty("jcifs.smb.client.responseTimeout", "10000") // 응답 타임아웃 10초
+        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (8MB) - 고비트레이트 대응
+        prop.setProperty("jcifs.smb.client.rcv_buf_size", "8388608") 
+        prop.setProperty("jcifs.smb.client.snd_buf_size", "8388608")
+        // SMB2/3 프로토콜에서의 최대 읽기/쓰기 크기 상향
+        prop.setProperty("jcifs.smb.client.smb2.maxRead", "8388608")
+        prop.setProperty("jcifs.smb.client.smb2.maxWrite", "8388608")
+        // 동시 요청 버퍼 수 증가
+        prop.setProperty("jcifs.smb.client.maxBuffers", "128")
+        
+        prop.setProperty("jcifs.smb.client.connTimeout", "10000")     // 연결 타임아웃 10초
+        prop.setProperty("jcifs.smb.client.responseTimeout", "30000") // 응답 타임아웃 30초
         
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
@@ -81,35 +87,71 @@ class SmbDataSource : BaseDataSource(true) {
                 val auth = NtlmPasswordAuthenticator(null, username, password)
                 context = createCifsContext().withCredentials(auth)
 
-                val host = uri?.host ?: ""
+                // uri.host가 null인 경우(예: smb:///192.168.x.x/...)를 대비하여 authority나 path에서 추출 시도
+                var host = uri?.host ?: ""
                 val port = if (uri?.port != -1) ":${uri?.port}" else ""
 
-                val fullPath = uri?.path ?: ""
-                val lastSlashIndex = fullPath.lastIndexOf('/')
+                val fullEncodedPath = uri?.encodedPath ?: ""
+                val fullDecodedPath = uri?.path ?: ""
+                
+                // host가 비어있다면 malformed URI일 가능성이 높음 (smb:///host/path 등)
+                // 이 경우 path의 첫 번째 세그먼트가 호스트일 수 있음.
+                if (host.isEmpty()) {
+                    val segments = fullEncodedPath.split("/").filter { it.isNotEmpty() }
+                    if (segments.isNotEmpty()) {
+                        host = segments[0]
+                    }
+                }
+
+                val lastSlashIndex = fullEncodedPath.lastIndexOf('/')
 
                 if (lastSlashIndex >= 0) {
-                    val parentPath = fullPath.substring(0, lastSlashIndex + 1)
-                    val fileName = fullPath.substring(lastSlashIndex + 1)
-                    val parentUrl = "smb://$host$port$parentPath"
+                    val parentEncodedPath = fullEncodedPath.substring(0, lastSlashIndex + 1)
+                    // 파일명은 디코딩된 원본 이름을 사용해야 jcifs-ng가 올바르게 인식함
+                    val fileName = fullDecodedPath.substringAfterLast('/')
+                    
+                    // 호스트가 중복 포함되지 않도록 체크 (부모 경로는 여전히 인코딩된 상태 유지)
+                    val parentUrl = if (parentEncodedPath.startsWith("/$host/")) {
+                        "smb://$host$port${parentEncodedPath.substring(host.length + 1)}"
+                    } else {
+                        "smb://$host$port$parentEncodedPath"
+                    }
+                    
                     val parentFile = SmbFile(parentUrl, context)
                     smbFile = SmbFile(parentFile, fileName)
                 } else {
-                    smbFile = SmbFile("smb://$host$port$fullPath", context)
+                    // 전체 경로를 사용할 경우 jcifs-ng가 URL 객체로 파싱하므로 인코딩된 경로를 사용
+                    smbFile = SmbFile("smb://$host$port$fullEncodedPath", context)
                 }
             } else {
                 context = createCifsContext()
-                val fullPath = uri?.path ?: ""
-                val lastSlashIndex = fullPath.lastIndexOf('/')
-                val host = uri?.host ?: ""
+                var host = uri?.host ?: ""
                 val port = if (uri?.port != -1) ":${uri?.port}" else ""
+                val fullEncodedPath = uri?.encodedPath ?: ""
+                val fullDecodedPath = uri?.path ?: ""
+
+                if (host.isEmpty()) {
+                    val segments = fullEncodedPath.split("/").filter { it.isNotEmpty() }
+                    if (segments.isNotEmpty()) {
+                        host = segments[0]
+                    }
+                }
+
+                val lastSlashIndex = fullEncodedPath.lastIndexOf('/')
 
                 if (lastSlashIndex >= 0) {
-                    val parentPath = fullPath.substring(0, lastSlashIndex + 1)
-                    val fileName = fullPath.substring(lastSlashIndex + 1)
-                    val parentFile = SmbFile("smb://$host$port$parentPath", context)
+                    val parentEncodedPath = fullEncodedPath.substring(0, lastSlashIndex + 1)
+                    val fileName = fullDecodedPath.substringAfterLast('/')
+                    
+                    val parentUrl = if (parentEncodedPath.startsWith("/$host/")) {
+                        "smb://$host$port${parentEncodedPath.substring(host.length + 1)}"
+                    } else {
+                        "smb://$host$port$parentEncodedPath"
+                    }
+                    val parentFile = SmbFile(parentUrl, context)
                     smbFile = SmbFile(parentFile, fileName)
                 } else {
-                    smbFile = SmbFile(uri.toString(), context)
+                    smbFile = SmbFile("smb://$host$port$fullEncodedPath", context)
                 }
             }
 

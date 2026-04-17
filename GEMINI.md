@@ -42,7 +42,7 @@ The project follows an MVVM-like pattern:
   - **Android Gradle Plugin (AGP)**: 8.13.2+
   - **Media3**: 1.9.2+ (Core playback engine)
   - **Compose BOM**: 2026.02.00+
-  - **Android XR (Spatial)**: 1.0.0-alpha10 (Maintain until stable release)
+  - **Android XR (Spatial)**: 1.0.0-alpha12 (Maintain until stable release)
   - **jcifs-ng**: 2.1.10+ (SMB streaming)
 - **Dependency Updates**: When updating libraries, verify API compatibility (e.g., Media3 `C` class constants) and perform full regression testing on both 2D and Spatial modes.
 

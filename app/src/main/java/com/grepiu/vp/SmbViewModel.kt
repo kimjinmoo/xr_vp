@@ -28,6 +28,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     var username by mutableStateOf("")
     var password by mutableStateOf("")
     var serverName by mutableStateOf("")
+    var isAnonymous by mutableStateOf(false)
 
     var isConnected by mutableStateOf(false)
         private set
@@ -43,6 +44,10 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
 
     var showForm by mutableStateOf(false)
 
+    // 편집 모드 여부
+    var isEditMode by mutableStateOf(false)
+    var editingServer: SmbServer? = null
+
     init {
         loadSavedServers()
         // 저장된 서버가 없으면 폼을 먼저 보여줌
@@ -57,8 +62,9 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
             val ip = prefs.getString("server_ip_$i", "") ?: ""
             val user = prefs.getString("server_user_$i", "") ?: ""
             val pass = prefs.getString("server_pass_$i", "") ?: ""
+            val anonymous = prefs.getBoolean("server_anon_$i", false)
             if (ip.isNotBlank()) {
-                servers.add(SmbServer(name, ip, user, pass))
+                servers.add(SmbServer(name, ip, user, pass, anonymous))
             }
         }
         savedServers = servers
@@ -66,12 +72,14 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun saveServersToPrefs(servers: List<SmbServer>) {
         prefs.edit().apply {
+            clear() // 기존 데이터 정리
             putInt("server_count", servers.size)
             servers.forEachIndexed { i, server ->
                 putString("server_name_$i", server.name)
                 putString("server_ip_$i", server.ip)
                 putString("server_user_$i", server.user)
                 putString("server_pass_$i", server.pass)
+                putBoolean("server_anon_$i", server.isAnonymous)
             }
             apply()
         }
@@ -81,10 +89,40 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     fun addCurrentServer() {
         if (serverIp.isBlank()) return
         val newName = if (serverName.isBlank()) serverIp else serverName
-        val newServer = SmbServer(newName, serverIp, username, password)
-        val updatedList = savedServers.filter { it.ip != serverIp } + newServer
+        val newServer = SmbServer(newName, serverIp, username, password, isAnonymous)
+        
+        val updatedList = if (isEditMode && editingServer != null) {
+            // 편집 모드인 경우 기존 서버 정보를 업데이트
+            savedServers.map { if (it == editingServer) newServer else it }
+        } else {
+            // 새 서버 추가 시 동일 IP가 있으면 덮어씀
+            savedServers.filter { it.ip != serverIp } + newServer
+        }
+        
         saveServersToPrefs(updatedList)
+        resetForm()
+    }
+
+    fun editServer(server: SmbServer) {
+        serverIp = server.ip
+        username = server.user
+        password = server.pass
+        serverName = server.name
+        isAnonymous = server.isAnonymous
+        editingServer = server
+        isEditMode = true
+        showForm = true
+    }
+
+    fun resetForm() {
+        serverIp = ""
+        username = ""
+        password = ""
         serverName = ""
+        isAnonymous = false
+        editingServer = null
+        isEditMode = false
+        showForm = false
     }
 
     fun removeServer(server: SmbServer) {
@@ -97,6 +135,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         username = server.user
         password = server.pass
         serverName = server.name
+        isAnonymous = server.isAnonymous
         connect()
     }
 
@@ -125,6 +164,8 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onNameChange(newName: String) { serverName = newName }
 
+    fun onAnonymousChange(anon: Boolean) { isAnonymous = anon }
+
     /**
      * SMB 서버에 접속을 시도함.
      * 성공 시 접속 정보를 저장하고 루트 파일 목록을 조회함.
@@ -140,7 +181,11 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 // 네트워크 지연을 고려하여 30초 타임아웃 설정
                 val success = withTimeout(30000L) {
-                    smbService.updateCredentials(username, password)
+                    if (isAnonymous) {
+                        smbService.updateAnonymousCredentials()
+                    } else {
+                        smbService.updateCredentials(username, password)
+                    }
                 }
                 
                 if (success) {
@@ -152,6 +197,8 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         items = result
                         isConnected = true
+                        // 접속 성공 시 서버 정보 저장 (이미 있으면 업데이트됨)
+                        addCurrentServer()
                     }
                 } else {
                     errorMessage = "Authentication failed"
@@ -221,7 +268,8 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
             val uri = Uri.parse(item.path)
             (uri.path ?: "") + (uri.fragment?.let { "#$it" } ?: "")
         }
-        return smbService.getAuthenticatedUri(serverIp, username, password, smbPath)
+        val (finalUser, finalPass) = if (isAnonymous) "" to "" else username to password
+        return smbService.getAuthenticatedUri(serverIp, finalUser, finalPass, smbPath)
     }
 
     /**

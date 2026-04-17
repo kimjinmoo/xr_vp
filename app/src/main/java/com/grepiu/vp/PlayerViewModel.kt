@@ -72,10 +72,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 .setLoadControl(
                     DefaultLoadControl.Builder()
                         .setBufferDurationsMs(
-                            15000,  // 최소 버퍼 15초 (기존 60초에서 하향)
-                            30000,  // 최대 버퍼 30초 (기존 120초에서 하향)
-                            2500,   // 재생 시작을 위한 최소 버퍼 2.5초
-                            5000    // 버퍼링 후 재개 시 최소 버퍼 5초
+                            30000,  // 최소 버퍼 30초
+                            120000, // 최대 버퍼 120초
+                            5000,   // 재생 시작을 위한 최소 버퍼 5초
+                            10000   // 버퍼링 후 재개 시 최소 버퍼 10초
                         )
                         .setPrioritizeTimeOverSizeThresholds(true)
                         .build()
@@ -121,7 +121,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        Log.d("VP_DEBUG", "Preparing Video: $uri (force=$force)")
+        Log.d("VP_DEBUG", "Preparing Video: ${Uri.decode(uri.toString())} (force=$force)")
         currentUri = uri
         
         // 기존 상태 초기화

@@ -18,7 +18,8 @@ data class SmbServer(
     val name: String,
     val ip: String,
     val user: String = "",
-    val pass: String = ""
+    val pass: String = "",
+    val isAnonymous: Boolean = false
 )
 
 /**
@@ -65,6 +66,22 @@ class SmbService {
     suspend fun updateCredentials(username: String, password: String, domain: String? = null): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             val auth = NtlmPasswordAuthenticator(domain, username, password)
+            currentAuthContext = createBaseContext().withCredentials(auth)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 익명(Guest) 인증 컨텍스트로 업데이트함.
+     * 
+     * @return 인증 설정 성공 여부.
+     */
+    suspend fun updateAnonymousCredentials(): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            // jcifs-ng에서 익명 접속을 위해 null 인증 정보를 사용함
+            val auth = NtlmPasswordAuthenticator(null, null, null)
             currentAuthContext = createBaseContext().withCredentials(auth)
             true
         } catch (e: Exception) {
