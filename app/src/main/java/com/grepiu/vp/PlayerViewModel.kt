@@ -113,7 +113,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 setMediaCodecSelector(customMediaCodecSelector)
             }
 
-            // BandwidthMeter 설정 (ExoPlayer 내부 로직용)
+            // BandwidthMeter 설정
             val meter = DefaultBandwidthMeter.Builder(context)
                 .setInitialBitrateEstimate(200_000_000L)
                 .build()
@@ -121,12 +121,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
             val allocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
 
+            // 8K(AV1/HEVC) 초고화질 재생을 위한 대용량 버퍼 및 메모리 최적화 설정
             val loadControl = DefaultLoadControl.Builder()
                 .setAllocator(allocator)
-                .setBufferDurationsMs(60_000, 120_000, 5_000, 10_000)
-                .setTargetBufferBytes(256 * 1024 * 1024)
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .setBackBuffer(10_000, true)
+                .setBufferDurationsMs(
+                    60_000,   // 최소 버퍼 (1분)
+                    180_000,  // 최대 버퍼 (3분): 8K 영상의 안정적 파이프라이닝 보장
+                    15_000,   // 최초 재생 시작을 위한 최소 버퍼 (15초): 8K 데이터 확보 필요
+                    30_000    // 리버퍼링 후 재생 시작 버퍼 (30초): 끊김 방지 우선
+                )
+                .setTargetBufferBytes(1536 * 1024 * 1024) // 1.5GB 메모리 할당 (8K 스트리밍 필수)
+                .setPrioritizeTimeOverSizeThresholds(false) // 8K에서는 데이터 크기 임계치도 중요함
+                .setBackBuffer(15_000, true) // 15초 백버퍼 유지
                 .build()
 
             exoPlayer = ExoPlayer.Builder(context, renderersFactory)
@@ -151,7 +157,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     })
                 }
             
-            // 측정 상태 초기화
             lastMeasuredBytes = 0L
             lastMeasuredTime = System.currentTimeMillis()
             totalBytesTransferred.set(0)
@@ -160,7 +165,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * UI 스레드에서 주기적으로 호출됨 (약 500ms~1s 주기)
+     * UI 스레드에서 주기적으로 호출됨 (약 500ms 주기를 권장)
      */
     fun updateProgress() {
         val now = System.currentTimeMillis()
@@ -185,12 +190,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         // 실시간 초당 전송 속도 계산 (Bits per second)
         val currentTotalBytes = totalBytesTransferred.get()
         val timeDiff = now - lastMeasuredTime
-        if (timeDiff >= 500) { // 최소 500ms 주기로 계산
+        if (timeDiff >= 500) { // 500ms 주기로 샘플링
             val byteDiff = currentTotalBytes - lastMeasuredBytes
             if (byteDiff >= 0) {
-                val bps = (byteDiff * 8000) / timeDiff
-                this.currentBandwidth = bps
-                Log.d("VP_NET", "Instantaneous Speed: ${bps / 1_000_000.0} Mbps")
+                val measuredBps = (byteDiff * 8000) / timeDiff
+                
+                // 속도 표시가 튀는 현상을 방지하기 위해 지수 이동 평균(EMA) 적용
+                // 새 측정값에 40% 가중치, 기존 값에 60% 가중치를 주어 부드럽게 표시
+                if (this.currentBandwidth == 0L) {
+                    this.currentBandwidth = measuredBps
+                } else {
+                    this.currentBandwidth = ((this.currentBandwidth * 0.6) + (measuredBps * 0.4)).toLong()
+                }
+                
+                Log.d("VP_NET", "Smooth Speed: ${this.currentBandwidth / 1_000_000.0} Mbps")
             }
             lastMeasuredBytes = currentTotalBytes
             lastMeasuredTime = now
@@ -205,7 +218,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         Log.d("VP_DEBUG", "Preparing Video: ${Uri.decode(uri.toString())} (force=$force)")
         currentUri = uri
         
-        // 데이터 전송량 카운터 초기화
         totalBytesTransferred.set(0)
         lastMeasuredBytes = 0
         lastMeasuredTime = System.currentTimeMillis()
@@ -214,9 +226,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         player.stop()
         player.clearMediaItems()
 
-        // SmbDataSourceFactory에 수동 리스너와 BandwidthMeter 모두 등록
         val dataSourceFactory = if (uri.scheme?.lowercase() == "smb") {
-            // 가변 인자로 여러 리스너 전달 가능
             SmbDataSourceFactory(manualTransferListener, bandwidthMeter)
         } else {
             DefaultDataSource.Factory(context)

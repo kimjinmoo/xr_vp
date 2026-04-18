@@ -23,7 +23,7 @@ import kotlin.math.min
 
 /**
  * ExoPlayer가 SMB(Server Message Block) 네트워크 공유 파일에서 데이터를 스트리밍할 수 있게 해주는 커스텀 데이터 소스.
- * jcifs-ng 라이브러리를 사용하여 SMB2/3 프로토콜을 지원하며, 표준 힙 메모리 환경에 최적화됨.
+ * jcifs-ng 라이브러리를 사용하여 SMB2/3 프로토콜을 지원하며, 8K 스트리밍 성능 극대화를 위한 초고속 파이프라이닝이 적용됨.
  */
 @UnstableApi
 class SmbDataSource : BaseDataSource(true) {
@@ -41,21 +41,38 @@ class SmbDataSource : BaseDataSource(true) {
 
     /**
      * jcifs-ng 설정을 위한 인증 및 파이프라이닝 컨텍스트 생성.
+     * 8K 초고화질 스트리밍을 위해 처리량(Throughput)과 안정성을 모두 극대화함.
+     * 
+     * @return 설정된 CIFSContext 객체.
      */
     private fun createCifsContext(): CIFSContext {
         val prop = Properties()
+        // 1. 프로토콜 기본 최적화
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
-        prop.setProperty("jcifs.smb.client.disableSMB1", "false")
+        prop.setProperty("jcifs.smb.client.disableSMB1", "true") 
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
-        prop.setProperty("jcifs.smb.client.rcv_buf_size", "8388608") 
+        
+        // 2. 네트워크 윈도우 및 버퍼 확장 (16MB)
+        prop.setProperty("jcifs.smb.client.rcv_buf_size", "16777216") 
         prop.setProperty("jcifs.smb.client.snd_buf_size", "1048576")
-        prop.setProperty("jcifs.smb.client.smb2.maxRead", "4194304")
+        
+        // 3. 8K 대역폭 확보를 위한 읽기 블록 확장 (8MB)
+        prop.setProperty("jcifs.smb.client.smb2.maxRead", "8388608")
         prop.setProperty("jcifs.smb.client.smb2.maxWrite", "1048576")
+        
+        // 4. 파이프라이닝 극대화: 동시 요청 버퍼 수를 64개로 늘려 네트워크 레이턴시 극복
+        // 64개 * 8MB 요청 구조로 고속 네트워크 대역폭을 완전히 점유함
+        prop.setProperty("jcifs.smb.client.maxBuffers", "64")
+        
+        // 5. 실시간성 확보 및 지연 최소화
         prop.setProperty("jcifs.smb.client.tcpNoDelay", "true")
-        prop.setProperty("jcifs.smb.client.maxBuffers", "8")
-        prop.setProperty("jcifs.smb.client.connTimeout", "10000")
-        prop.setProperty("jcifs.smb.client.responseTimeout", "30000")
+        prop.setProperty("jcifs.smb.client.useBatching", "true")
+        
+        // 6. 불규칙한 속도 방지를 위한 세션 안정성 설정
+        prop.setProperty("jcifs.smb.client.connTimeout", "10000")      // 10초 연결 타임아웃
+        prop.setProperty("jcifs.smb.client.responseTimeout", "30000")  // 30초 응답 대기
+        prop.setProperty("jcifs.smb.client.sessionTimeout", "60000")   // 60초 세션 유지
         
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
@@ -149,7 +166,8 @@ class SmbDataSource : BaseDataSource(true) {
                 raf.seek(dataSpec.position)
             }
 
-            inputStream = BufferedInputStream(SmbInputStream(raf), 4 * 1024 * 1024)
+            // 8MB 읽기 블록에 맞춘 고성능 스트림 버퍼 적용
+            inputStream = BufferedInputStream(SmbInputStream(raf), 8 * 1024 * 1024)
 
             bytesToRead = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length
