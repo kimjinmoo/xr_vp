@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -119,7 +120,7 @@ enum class AppThemeMode {
 
 /**
  * 앱의 진입점이 되는 메인 액티비티.
- * 몰입 모드 관련 로직을 제거하고 패널 기반 UI에 집중함.
+ * 전체적인 네비게이션 흐름과 2D/공간 UI 전환을 제어함.
  */
 class MainActivity : ComponentActivity() {
 
@@ -134,6 +135,7 @@ class MainActivity : ComponentActivity() {
             var currentLanguage by remember { mutableStateOf(settingsManager.getLanguage()) }
             var currentThemeMode by remember { mutableStateOf(settingsManager.getThemeMode()) }
             
+            // 테마 설정 계산
             val darkTheme = when (currentThemeMode) {
                 AppThemeMode.LIGHT -> false
                 AppThemeMode.DARK -> true
@@ -142,19 +144,43 @@ class MainActivity : ComponentActivity() {
 
             VPTheme(darkTheme = darkTheme) {
                 var videoUri by remember { mutableStateOf<Uri?>(null) }
-                var currentDestination by remember { mutableStateOf(AppDestination.PLAYER) }
+                var currentDestination by remember { mutableStateOf(AppDestination.LOCAL) }
+                var lastBrowserDestination by remember { mutableStateOf(AppDestination.LOCAL) }
                 var isNavigationExpanded by remember { mutableStateOf(false) }
                 var isFullscreen by remember { mutableStateOf(false) }
                 
+                // 현재 설정된 언어에 따른 문자열 로드
                 val strings = if (currentLanguage == AppLanguage.KOREAN) KoreanStrings else EnglishStrings
                 
+                // 공간 UI(Panel)용 사이즈 상태
                 var panelWidth by remember { mutableStateOf(1280.dp) }
                 var panelHeight by remember { mutableStateOf(800.dp) }
 
                 val view = LocalView.current
                 val window = (view.context as? android.app.Activity)?.window
 
-                // 권한 요청 처리
+                val smbViewModel: SmbViewModel = viewModel()
+                val dlnaViewModel: DlnaViewModel = viewModel()
+                val playerViewModel: PlayerViewModel = viewModel()
+
+                // 내비게이션 상태 변경 핸들러
+                val changeDestination: (AppDestination) -> Unit = remember {
+                    { newDest ->
+                        if (newDest != AppDestination.PLAYER && newDest != AppDestination.SETTINGS && newDest != AppDestination.LICENSES) {
+                            lastBrowserDestination = newDest
+                        }
+                        currentDestination = newDest
+                    }
+                }
+
+                // 플레이어 종료 및 복귀 처리
+                val onClosePlayer = {
+                    videoUri = null
+                    changeDestination(lastBrowserDestination)
+                    playerViewModel.releasePlayer()
+                }
+
+                // DLNA 검색에 필요한 NEARBY_WIFI_DEVICES 권한 요청 처리
                 val context = LocalContext.current
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
@@ -176,7 +202,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 
-                // 시스템 바 제어 (풀스크린 모드 대응)
+                // 시스템 바 제어 (풀스크린 모드 시나리오 대응)
                 LaunchedEffect(isFullscreen) {
                     window?.let {
                         val controller = WindowCompat.getInsetsController(it, view)
@@ -189,17 +215,20 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // 로컬 파일 선택을 위한 런처
                 val launcher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.GetContent()
                 ) { uri: Uri? ->
                     uri?.let { 
                         videoUri = it 
-                        currentDestination = AppDestination.PLAYER
+                        changeDestination(AppDestination.PLAYER)
                     }
                 }
 
+                // Android XR 공간 UI 지원 여부 확인
                 val isSpatialUiEnabled = LocalSpatialCapabilities.current.isSpatialUiEnabled
 
+                // 윈도우 리사이즈 요청 핸들러
                 val onResizeWindow: (Int, Int) -> Unit = remember {
                     { width, height ->
                         if (width > 0 && height > 0) {
@@ -211,6 +240,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (isSpatialUiEnabled) {
+                    // 공간 UI 모드 (Android XR 전 전용 패널)
                     Subspace {
                         SpatialPanel(SubspaceModifier.width(panelWidth).height(panelHeight)) {
                             Surface(shape = RoundedCornerShape(28.dp)) {
@@ -232,19 +262,24 @@ class MainActivity : ComponentActivity() {
                                     },
                                     onToggleFullscreen = {},
                                     onOpenFile = { launcher.launch("video/*") },
-                                    onDestinationChange = { currentDestination = it },
+                                    onDestinationChange = changeDestination,
                                     onFileSelected = { 
                                         videoUri = it
-                                        currentDestination = AppDestination.PLAYER
+                                        changeDestination(AppDestination.PLAYER)
                                     },
+                                    onClosePlayer = onClosePlayer,
                                     onToggleNavigation = { isNavigationExpanded = !isNavigationExpanded },
                                     onResizeWindow = onResizeWindow,
-                                    modifier = Modifier.fillMaxSize()
+                                    modifier = Modifier.fillMaxSize(),
+                                    smbViewModel = smbViewModel,
+                                    dlnaViewModel = dlnaViewModel,
+                                    playerViewModel = playerViewModel
                                 )
                             }
                         }
                     }
                 } else {
+                    // 표준 2D UI 모드
                     Box(modifier = Modifier.fillMaxSize()) {
                         MainContent(
                             videoUri = videoUri,
@@ -264,14 +299,18 @@ class MainActivity : ComponentActivity() {
                             },
                             onToggleFullscreen = { isFullscreen = !isFullscreen },
                             onOpenFile = { launcher.launch("video/*") },
-                            onDestinationChange = { currentDestination = it },
+                            onDestinationChange = changeDestination,
                             onFileSelected = { 
                                 videoUri = it
-                                currentDestination = AppDestination.PLAYER
+                                changeDestination(AppDestination.PLAYER)
                             },
+                            onClosePlayer = onClosePlayer,
                             onToggleNavigation = { isNavigationExpanded = !isNavigationExpanded },
                             onResizeWindow = onResizeWindow,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            smbViewModel = smbViewModel,
+                            dlnaViewModel = dlnaViewModel,
+                            playerViewModel = playerViewModel
                         )
                     }
                 }
@@ -282,7 +321,8 @@ class MainActivity : ComponentActivity() {
 
 
 /**
- * 앱의 실제 네비게이션 구조와 메인 컨텐츠.
+ * 앱의 실제 네비게이션 구조와 메인 컨텐츠 영역을 구성함.
+ * 좌측 사이드바 네비게이션과 우측 컨텐츠 영역을 포함.
  */
 @Composable
 fun MainContent(
@@ -299,18 +339,20 @@ fun MainContent(
     onOpenFile: () -> Unit,
     onDestinationChange: (AppDestination) -> Unit,
     onFileSelected: (Uri) -> Unit,
+    onClosePlayer: () -> Unit,
     onToggleNavigation: () -> Unit,
     onResizeWindow: (Int, Int) -> Unit,
     modifier: Modifier = Modifier,
-    smbViewModel: SmbViewModel = viewModel(),
-    dlnaViewModel: DlnaViewModel = viewModel(),
-    playerViewModel: PlayerViewModel = viewModel()
+    smbViewModel: SmbViewModel,
+    dlnaViewModel: DlnaViewModel,
+    playerViewModel: PlayerViewModel
 ) {
     Row(
         modifier = modifier
             .background(MaterialTheme.colorScheme.surface)
             .then(if (!isFullscreen) Modifier.statusBarsPadding().navigationBarsPadding() else Modifier)
     ) {
+        // 네비게이션 사이드바 (풀스크린이 아닐 때만 표시)
         if (!isFullscreen) {
             val sidebarWidth by animateDpAsState(if (isNavigationExpanded) 200.dp else 80.dp, label = "sidebarWidth")
             
@@ -321,6 +363,7 @@ fun MainContent(
                     .padding(vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // 메뉴 펼치기/접기 버튼
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -333,13 +376,14 @@ fun MainContent(
                     ) {
                         Icon(
                             imageVector = if (isNavigationExpanded) Icons.AutoMirrored.Filled.MenuOpen else Icons.Default.Menu,
-                            contentDescription = if (isNavigationExpanded) "Collapse" else "Expand",
+                            contentDescription = if (isNavigationExpanded) strings.collapse else strings.expand,
                             modifier = Modifier.size(32.dp),
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
                 
+                // 네비게이션 아이템들
                 NavigationItem(
                     icon = Icons.Default.PlayArrow,
                     label = strings.menuPlayer,
@@ -392,6 +436,7 @@ fun MainContent(
             }
         }
 
+        // 우측 컨텐츠 영역
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -406,6 +451,7 @@ fun MainContent(
                             strings = strings,
                             onResizeWindowRequest = onResizeWindow,
                             onToggleFullscreen = onToggleFullscreen,
+                            onClose = onClosePlayer,
                             isFullscreen = isFullscreen,
                             modifier = Modifier.fillMaxSize(),
                             playerViewModel = playerViewModel
@@ -449,6 +495,9 @@ fun MainContent(
     }
 }
 
+/**
+ * 설정 화면 컨텐츠. 언어 및 테마 설정을 담당함.
+ */
 @Composable
 fun SettingsContent(
     strings: UiStrings,
@@ -477,6 +526,7 @@ fun SettingsContent(
         )
         
         LazyColumn(verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            // 1. 언어 설정 카드
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -506,6 +556,7 @@ fun SettingsContent(
                 }
             }
 
+            // 2. 테마 설정 카드
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -540,6 +591,7 @@ fun SettingsContent(
                 }
             }
 
+            // 3. 앱 정보 및 업데이트 카드
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -582,6 +634,9 @@ fun SettingsContent(
     }
 }
 
+/**
+ * 오픈소스 라이선스 정보를 표시하는 화면.
+ */
 @Composable
 fun LicenseContent(strings: UiStrings, modifier: Modifier = Modifier) {
     val licenses = listOf(
@@ -664,6 +719,9 @@ fun LicenseContent(strings: UiStrings, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * SMB 서버 브라우징 컨텐츠 영역을 구성함.
+ */
 @Composable
 fun SmbBrowserContent(
     strings: UiStrings,
@@ -731,20 +789,24 @@ fun SmbBrowserContent(
                         isEditMode = viewModel.isEditMode,
                         errorMessage = viewModel.errorMessage,
                         isLoading = viewModel.isLoading,
+                        isScanning = viewModel.isScanning,
+                        discoveredServers = viewModel.discoveredServers,
                         onNameChange = viewModel::onNameChange,
                         onIpChange = viewModel::onIpChange,
                         onUserChange = viewModel::onUserChange,
                         onPassChange = viewModel::onPassChange,
                         onAnonymousChange = viewModel::onAnonymousChange,
-                        onConnect = viewModel::connect,
+                        onConnect = { viewModel.connect(strings) },
                         onSave = viewModel::addCurrentServer,
+                        onScan = viewModel::startNetworkScan,
+                        onSelectDiscovered = { viewModel.selectServer(it, strings) },
                         modifier = Modifier.fillMaxWidth(0.7f).zIndex(1f)
                     )
                 } else {
                     SmbServerList(
                         strings = strings,
                         servers = viewModel.savedServers,
-                        onServerClick = { viewModel.selectServer(it) },
+                        onServerClick = { viewModel.selectServer(it, strings) },
                         onEditClick = { viewModel.editServer(it) },
                         onDeleteClick = { viewModel.removeServer(it) },
                         onAddNew = { viewModel.showForm = true }
@@ -765,13 +827,13 @@ fun SmbBrowserContent(
                 )
             }
 
-            // 전체 화면 로딩 오버레이 추가 (연결 중이거나 브라우징 중일 때)
+            // 전체 화면 로딩 오버레이 (연결 또는 탐색 중)
             if (viewModel.isLoading) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.3f))
-                        .clickable(enabled = true, onClick = {}), // 터치 차단
+                        .clickable(enabled = true, onClick = {}),
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -781,6 +843,9 @@ fun SmbBrowserContent(
     }
 }
 
+/**
+ * 저장된 SMB 서버 목록을 표시하는 UI.
+ */
 @Composable
 fun SmbServerList(
     strings: UiStrings,
@@ -839,6 +904,9 @@ fun SmbServerList(
     }
 }
 
+/**
+ * SMB 서버 연결을 위한 입력 폼 UI. 자동 스캔 기능을 포함함.
+ */
 @Composable
 fun SmbConnectForm(
     strings: UiStrings,
@@ -850,6 +918,8 @@ fun SmbConnectForm(
     isEditMode: Boolean,
     errorMessage: String?,
     isLoading: Boolean,
+    isScanning: Boolean,
+    discoveredServers: List<SmbServer>,
     onNameChange: (String) -> Unit,
     onIpChange: (String) -> Unit,
     onUserChange: (String) -> Unit,
@@ -857,6 +927,8 @@ fun SmbConnectForm(
     onAnonymousChange: (Boolean) -> Unit,
     onConnect: () -> Unit,
     onSave: () -> Unit,
+    onScan: () -> Unit,
+    onSelectDiscovered: (SmbServer) -> Unit,
     modifier: Modifier = Modifier
 ) {
     ElevatedCard(
@@ -887,14 +959,55 @@ fun SmbConnectForm(
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp)
             )
-            OutlinedTextField(
-                value = serverIp,
-                onValueChange = onIpChange,
-                label = { Text(strings.serverIp) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp)
-            )
+            
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = serverIp,
+                    onValueChange = onIpChange,
+                    label = { Text(strings.serverIp) },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = onScan,
+                    enabled = !isScanning,
+                    modifier = Modifier.size(56.dp).background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(12.dp))
+                ) {
+                    if (isScanning) CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Search, strings.scanServers, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+                }
+            }
+
+            // 발견된 서버 목록 표시
+            if (discoveredServers.isNotEmpty() && !isEditMode) {
+                Text(
+                    text = "${discoveredServers.size}${strings.scanFound}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                LazyColumn(
+                    modifier = Modifier.height(100.dp).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(discoveredServers) { server ->
+                        Surface(
+                            onClick = { onSelectDiscovered(server) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Storage, null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(server.ip, style = MaterialTheme.typography.bodySmall)
+                                Spacer(modifier = Modifier.weight(1f))
+                                Text(server.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
             
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -963,6 +1076,9 @@ fun SmbConnectForm(
     }
 }
 
+/**
+ * SMB 폴더 내의 파일 리스트를 표시하는 UI.
+ */
 @Composable
 fun SmbFileList(
     strings: UiStrings,
@@ -1037,6 +1153,9 @@ fun SmbFileList(
     }
 }
 
+/**
+ * DLNA 장치 및 컨텐츠 브라우징 영역을 구성함.
+ */
 @Composable
 fun DlnaBrowserContent(
     strings: UiStrings,
@@ -1101,6 +1220,9 @@ fun DlnaBrowserContent(
     }
 }
 
+/**
+ * 발견된 DLNA 미디어 서버 리스트를 표시하는 UI.
+ */
 @Composable
 fun DlnaDeviceList(
     strings: UiStrings,
@@ -1116,7 +1238,7 @@ fun DlnaDeviceList(
         ) {
             Text(strings.mediaServers, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
             IconButton(onClick = onRefresh) {
-                Icon(Icons.Default.Add, contentDescription = "Refresh", tint = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Default.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
@@ -1168,6 +1290,9 @@ fun DlnaDeviceList(
     }
 }
 
+/**
+ * DLNA 서버 내의 아이템(폴더/파일) 리스트를 표시하는 UI.
+ */
 @Composable
 fun DlnaItemList(
     strings: UiStrings,
@@ -1177,7 +1302,7 @@ fun DlnaItemList(
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         if (isLoading) {
-            CircularProgressIndicator(modifier = Alignment.Center.run { Modifier.align(this) }, color = MaterialTheme.colorScheme.primary)
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center), color = MaterialTheme.colorScheme.primary)
         }
         
         LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -1234,6 +1359,9 @@ fun DlnaItemList(
     }
 }
 
+/**
+ * 로컬 파일 선택을 위한 안내 영역을 구성함.
+ */
 @Composable
 fun LocalBrowserContent(
     strings: UiStrings,
@@ -1253,6 +1381,9 @@ fun LocalBrowserContent(
     }
 }
 
+/**
+ * 사이드바에 표시되는 개별 네비게이션 메뉴 아이템.
+ */
 @Composable
 fun NavigationItem(
     icon: ImageVector,

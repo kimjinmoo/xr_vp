@@ -22,51 +22,46 @@ import kotlin.math.min
 
 /**
  * ExoPlayer가 SMB(Server Message Block) 네트워크 공유 파일에서 데이터를 스트리밍할 수 있게 해주는 커스텀 데이터 소스.
- * jcifs-ng 라이브러리를 사용하여 SMB2/3 프로토콜을 지원함.
+ * jcifs-ng 라이브러리를 사용하여 SMB2/3 프로토콜을 지원하며, 표준 힙 메모리 환경에 최적화됨.
  */
 @UnstableApi
 class SmbDataSource : BaseDataSource(true) {
+    /** 현재 재생 중인 SMB 파일의 URI. */
     private var uri: Uri? = null
+    
+    /** 데이터 읽기에 사용되는 입력 스트림. */
     private var inputStream: InputStream? = null
-    private var randomAccessFile: SmbRandomAccessFile? = null
+    
+    /** 남은 읽기 대상 바이트 수. */
     private var bytesToRead: Long = 0
+    
+    /** 현재 오픈된 데이터의 명세 정보. */
+    private var dataSpec: DataSpec? = null
 
     /**
-     * SmbRandomAccessFile을 InputStream으로 변환해주는 내부 어댑터 클래스.
-     */
-    private class SmbInputStream(private val raf: SmbRandomAccessFile) : InputStream() {
-        override fun read(): Int {
-            val b = ByteArray(1)
-            return if (raf.read(b) <= 0) -1 else b[0].toInt() and 0xFF
-        }
-        override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
-        override fun close() = raf.close()
-    }
-
-    /**
-     * jcifs-ng 설정을 위한 컨텍스트 생성.
-     * 8K 스트리밍 성능 극대화를 위해 버퍼 및 타임아웃을 공격적으로 설정함.
+     * jcifs-ng 설정을 위한 인증 및 파이프라이닝 컨텍스트 생성.
+     * 표준 힙 메모리 환경(non-largeHeap)에서 안정적인 처리량(Throughput)을 내도록 최적화됨.
      * 
      * @return 설정된 CIFSContext 객체.
      */
     private fun createCifsContext(): CIFSContext {
         val prop = Properties()
-        // 8K 고대역폭 대응을 위한 SMB 최적화 설정
+        // SMB 최적화 기본 설정
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
         prop.setProperty("jcifs.smb.client.disableSMB1", "false")
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         
-        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (16MB) - 초고비트레이트 대응
-        prop.setProperty("jcifs.smb.client.rcv_buf_size", "16777216") 
-        prop.setProperty("jcifs.smb.client.snd_buf_size", "16777216")
-        // SMB2/3 프로토콜에서의 최대 읽기/쓰기 크기 상향
-        prop.setProperty("jcifs.smb.client.smb2.maxRead", "16777216")
-        prop.setProperty("jcifs.smb.client.smb2.maxWrite", "16777216")
-        // TCP 통신 효율을 위해 지연(Nagle's algorithm) 비활성화
+        // 표준 메모리 환경에 맞춰 수신 버퍼 조정 (8MB)
+        prop.setProperty("jcifs.smb.client.rcv_buf_size", "8388608") 
+        prop.setProperty("jcifs.smb.client.snd_buf_size", "1048576")
+        // 단일 읽기 블록 크기를 4MB로 조정 (메모리 절약과 성능의 균형)
+        prop.setProperty("jcifs.smb.client.smb2.maxRead", "4194304")
+        prop.setProperty("jcifs.smb.client.smb2.maxWrite", "1048576")
+        // TCP NoDelay 활성화로 패킷 응답 지연 최소화
         prop.setProperty("jcifs.smb.client.tcpNoDelay", "true")
-        // 동시 요청 버퍼 수 증가
-        prop.setProperty("jcifs.smb.client.maxBuffers", "128")
+        // 동시 요청 버퍼 수를 8개로 줄여 메모리 점유 최소화 (8 * 4MB = 32MB 점유)
+        prop.setProperty("jcifs.smb.client.maxBuffers", "8")
         
         prop.setProperty("jcifs.smb.client.connTimeout", "10000")     // 연결 타임아웃 10초
         prop.setProperty("jcifs.smb.client.responseTimeout", "30000") // 응답 타임아웃 30초
@@ -75,14 +70,31 @@ class SmbDataSource : BaseDataSource(true) {
         return BaseContext(config)
     }
 
-    private var dataSpec: DataSpec? = null
+    /**
+     * SmbRandomAccessFile을 표준 InputStream으로 변환해주는 내부 어댑터 클래스.
+     * 1바이트 읽기 시의 오버헤드를 줄이기 위해 재사용 버퍼를 활용함.
+     * 
+     * @property raf 기반이 되는 SmbRandomAccessFile 객체.
+     */
+    private class SmbInputStream(private val raf: SmbRandomAccessFile) : InputStream() {
+        private val singleByteBuf = ByteArray(1)
+        
+        /** 1바이트를 읽어 반환함. */
+        override fun read(): Int = if (raf.read(singleByteBuf) <= 0) -1 else singleByteBuf[0].toInt() and 0xFF
+        
+        /** 지정된 바이트 배열로 데이터를 읽어들임. */
+        override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
+        
+        /** 스트림을 닫음. */
+        override fun close() = raf.close()
+    }
 
     /**
-     * 데이터 소스를 오픈함. URI에서 인증 정보를 추출하고 SMB 파일 스트림을 준비함.
+     * 데이터 소스를 오픈함. URI에서 인증 정보를 추출하고 SMB 파일 접근 권한을 획득함.
      * 
-     * @param dataSpec 읽을 데이터의 명세.
-     * @return 읽기 가능한 데이터의 총 길이.
-     * @throws IOException SMB 연결 또는 파일 접근 실패 시 발생.
+     * @param dataSpec 읽을 데이터의 위치 및 길이를 포함한 명세.
+     * @return 실제로 읽기 가능한 데이터의 총 길이.
+     * @throws IOException SMB 네트워크 오류 또는 파일 접근 거부 시 발생.
      */
     override fun open(dataSpec: DataSpec): Long {
         this.dataSpec = dataSpec
@@ -94,6 +106,7 @@ class SmbDataSource : BaseDataSource(true) {
             val context: CIFSContext
             val smbFile: SmbFile
             
+            // 1. 인증 정보 처리
             if (!encodedUserInfo.isNullOrBlank()) {
                 val decodedUserInfo = URLDecoder.decode(encodedUserInfo, "UTF-8")
                 val userPass = decodedUserInfo.split(":", limit = 2)
@@ -103,43 +116,32 @@ class SmbDataSource : BaseDataSource(true) {
                 val auth = NtlmPasswordAuthenticator(null, username, password)
                 context = createCifsContext().withCredentials(auth)
 
-                // uri.host가 null인 경우(예: smb:///192.168.x.x/...)를 대비하여 authority나 path에서 추출 시도
                 var host = uri?.host ?: ""
                 val port = if (uri?.port != -1) ":${uri?.port}" else ""
-
                 val fullEncodedPath = uri?.encodedPath ?: ""
                 val fullDecodedPath = uri?.path ?: ""
                 
-                // host가 비어있다면 malformed URI일 가능성이 높음 (smb:///host/path 등)
-                // 이 경우 path의 첫 번째 세그먼트가 호스트일 수 있음.
                 if (host.isEmpty()) {
                     val segments = fullEncodedPath.split("/").filter { it.isNotEmpty() }
-                    if (segments.isNotEmpty()) {
-                        host = segments[0]
-                    }
+                    if (segments.isNotEmpty()) host = segments[0]
                 }
 
                 val lastSlashIndex = fullEncodedPath.lastIndexOf('/')
-
                 if (lastSlashIndex >= 0) {
                     val parentEncodedPath = fullEncodedPath.substring(0, lastSlashIndex + 1)
-                    // 파일명은 디코딩된 원본 이름을 사용해야 jcifs-ng가 올바르게 인식함
                     val fileName = fullDecodedPath.substringAfterLast('/')
-                    
-                    // 호스트가 중복 포함되지 않도록 체크 (부모 경로는 여전히 인코딩된 상태 유지)
                     val parentUrl = if (parentEncodedPath.startsWith("/$host/")) {
                         "smb://$host$port${parentEncodedPath.substring(host.length + 1)}"
                     } else {
                         "smb://$host$port$parentEncodedPath"
                     }
-                    
                     val parentFile = SmbFile(parentUrl, context)
                     smbFile = SmbFile(parentFile, fileName)
                 } else {
-                    // 전체 경로를 사용할 경우 jcifs-ng가 URL 객체로 파싱하므로 인코딩된 경로를 사용
                     smbFile = SmbFile("smb://$host$port$fullEncodedPath", context)
                 }
             } else {
+                // 2. 익명 접속 처리
                 context = createCifsContext()
                 var host = uri?.host ?: ""
                 val port = if (uri?.port != -1) ":${uri?.port}" else ""
@@ -148,17 +150,13 @@ class SmbDataSource : BaseDataSource(true) {
 
                 if (host.isEmpty()) {
                     val segments = fullEncodedPath.split("/").filter { it.isNotEmpty() }
-                    if (segments.isNotEmpty()) {
-                        host = segments[0]
-                    }
+                    if (segments.isNotEmpty()) host = segments[0]
                 }
 
                 val lastSlashIndex = fullEncodedPath.lastIndexOf('/')
-
                 if (lastSlashIndex >= 0) {
                     val parentEncodedPath = fullEncodedPath.substring(0, lastSlashIndex + 1)
                     val fileName = fullDecodedPath.substringAfterLast('/')
-                    
                     val parentUrl = if (parentEncodedPath.startsWith("/$host/")) {
                         "smb://$host$port${parentEncodedPath.substring(host.length + 1)}"
                     } else {
@@ -172,20 +170,19 @@ class SmbDataSource : BaseDataSource(true) {
             }
 
             if (!smbFile.exists()) {
-                throw IOException("File does not exist: ${smbFile.canonicalPath}")
+                throw IOException("파일이 존재하지 않습니다: ${smbFile.canonicalPath}")
             }
             
             val fileLength = smbFile.length()
             
-            // SmbRandomAccessFile을 사용하여 물리적 seek 수행 (기존 skip 방식 대비 압도적 빠름)
+            // 3. 탐색(Seek) 최적화: SmbRandomAccessFile을 사용하여 즉각 이동
             val raf = SmbRandomAccessFile(smbFile, "r")
-            randomAccessFile = raf
             if (dataSpec.position > 0) {
                 raf.seek(dataSpec.position)
             }
 
-            // JNI 및 네트워크 호출 오버헤드를 줄이기 위해 16MB 수준의 완충 버퍼 적용 (maxRead와 일치)
-            inputStream = BufferedInputStream(SmbInputStream(raf), 16 * 1024 * 1024)
+            // 4. 처리량 최적화: 4MB 완충 버퍼로 네트워크 요청 횟수 최소화
+            inputStream = BufferedInputStream(SmbInputStream(raf), 4 * 1024 * 1024)
 
             bytesToRead = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length
@@ -197,18 +194,18 @@ class SmbDataSource : BaseDataSource(true) {
             bytesToRead
         } catch (e: Exception) {
             this.dataSpec = null
-            throw IOException("SMB Open Error: ${e.message}", e)
+            throw IOException("SMB 오픈 오류: ${e.message}", e)
         }
     }
 
     /**
-     * 데이터를 읽어 버퍼에 채움.
+     * 데이터를 읽어 인자로 받은 버퍼에 채움.
      * 
-     * @param buffer 데이터를 저장할 버퍼.
-     * @param offset 버퍼의 시작 오프셋.
-     * @param length 읽을 최대 길이.
-     * @return 실제 읽은 바이트 수, 또는 입력 끝인 경우 C.RESULT_END_OF_INPUT.
-     * @throws IOException 데이터 읽기 실패 시 발생.
+     * @param buffer 데이터를 저장할 타겟 바이트 배열.
+     * @param offset 버퍼의 시작 위치 오프셋.
+     * @param length 읽어올 최대 바이트 수.
+     * @return 실제 읽은 바이트 수, 또는 파일 끝에 도달한 경우 C.RESULT_END_OF_INPUT.
+     * @throws IOException 읽기 작업 중 네트워크 오류 발생 시.
      */
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
@@ -221,9 +218,7 @@ class SmbDataSource : BaseDataSource(true) {
             throw e
         }
         
-        if (read == -1) {
-            return C.RESULT_END_OF_INPUT
-        }
+        if (read == -1) return C.RESULT_END_OF_INPUT
 
         if (bytesToRead != C.LENGTH_UNSET.toLong()) {
             bytesToRead -= read
@@ -233,14 +228,14 @@ class SmbDataSource : BaseDataSource(true) {
     }
 
     /**
-     * 현재 오픈된 데이터의 URI를 반환함.
+     * 현재 열려있는 리소스의 URI를 반환함.
      * 
-     * @return 현재 URI, 오픈되지 않은 경우 null.
+     * @return 현재 URI 객체.
      */
     override fun getUri(): Uri? = uri
 
     /**
-     * 데이터 소스를 닫고 리소스를 해제함.
+     * 데이터 소스를 닫고 열려있는 모든 리소스를 해제함.
      */
     override fun close() {
         try {
@@ -259,7 +254,7 @@ class SmbDataSource : BaseDataSource(true) {
 }
 
 /**
- * SmbDataSource 인스턴스를 생성하기 위한 팩토리 클래스.
+ * 최적화된 SmbDataSource 인스턴스를 생성하기 위한 팩토리 클래스.
  */
 @UnstableApi
 class SmbDataSourceFactory : DataSource.Factory {

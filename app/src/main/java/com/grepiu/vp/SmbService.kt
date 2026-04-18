@@ -7,12 +7,22 @@ import jcifs.context.BaseContext
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.Properties
 
 /**
- * SMB 서버 정보 데이터 클래스.
+ * SMB 서버 접속 정보를 담는 데이터 클래스.
+ * 
+ * @property name 서버의 별칭 또는 호스트명.
+ * @property ip 서버의 IP 주소.
+ * @property user 접속 사용자 아이디.
+ * @property pass 접속 비밀번호.
+ * @property isAnonymous 익명 접속 여부.
  */
 data class SmbServer(
     val name: String,
@@ -23,45 +33,45 @@ data class SmbServer(
 )
 
 /**
- * SMB 서버 내의 개별 파일 또는 폴더 아이템 정보 데이터 클래스.
+ * SMB 서버 내의 개별 파일 또는 폴더 아이템 정보를 담는 데이터 클래스.
  * 
- * @property name 파일 또는 폴더 명.
- * @property path 전체 SMB 경로.
- * @property isDirectory 디렉토리 여부.
+ * @property name 파일 또는 폴더의 실제 이름.
+ * @property path 전체 SMB URI 경로.
+ * @property isDirectory 디렉토리(폴더) 여부.
  */
 data class SmbItem(val name: String, val path: String, val isDirectory: Boolean)
 
 /**
  * SMB 네트워크 연동을 위한 백엔드 서비스 클래스.
- * 네트워크 스캔, 파일 목록 조회, 인증 관리를 수행함.
+ * jcifs-ng 라이브러리를 래핑하여 네트워크 스캔, 파일 목록 조회, 인증 컨텍스트 관리를 수행함.
  */
 class SmbService {
     
     /**
-     * jcifs-ng 기본 설정을 생성함.
+     * jcifs-ng의 기본 설정(SMB2 지원, DFS 비활성 등)을 포함한 컨텍스트를 생성함.
      * 
-     * @return 생성된 CIFSContext.
+     * @return 초기화된 CIFSContext 객체.
      */
     private fun createBaseContext(): CIFSContext {
         val prop = Properties()
         prop.setProperty("jcifs.smb.client.enableSMB2", "true")
         prop.setProperty("jcifs.smb.client.disableSMB1", "false")
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
-        // DFS 기능을 비활성화하여 'The network name cannot be found' 오류 방지
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         val config = PropertyConfiguration(prop)
         return BaseContext(config)
     }
 
+    /** 현재 활성화된 인증 컨텍스트. */
     private var currentAuthContext: CIFSContext? = null
 
     /**
-     * 지정된 사용자 정보로 인증 컨텍스트를 업데이트함.
+     * 사용자 자격 증명을 기반으로 인증 컨텍스트를 업데이트함.
      * 
      * @param username 사용자 아이디.
      * @param password 사용자 비밀번호.
-     * @param domain 도메인 (기본값 null).
-     * @return 인증 성공 여부.
+     * @param domain 도메인 이름 (기본값 null).
+     * @return 인증 설정 성공 여부.
      */
     suspend fun updateCredentials(username: String, password: String, domain: String? = null): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
@@ -74,13 +84,12 @@ class SmbService {
     }
 
     /**
-     * 익명(Guest) 인증 컨텍스트로 업데이트함.
+     * 익명(Guest) 계정으로 인증 컨텍스트를 업데이트함.
      * 
      * @return 인증 설정 성공 여부.
      */
     suspend fun updateAnonymousCredentials(): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
-            // jcifs-ng에서 익명 접속을 위해 null 인증 정보를 사용함
             val auth = NtlmPasswordAuthenticator(null, null, null)
             currentAuthContext = createBaseContext().withCredentials(auth)
             true
@@ -90,26 +99,23 @@ class SmbService {
     }
 
     /**
-     * 현재 인증 정보를 해제함.
+     * 현재 인증 정보를 초기화하여 연결을 해제함.
      */
     fun disconnect() {
         currentAuthContext = null
     }
 
     /**
-     * 현재 인증 정보를 포함하여 ExoPlayer에서 사용할 수 있는 전체 SMB URI를 생성함.
+     * 인증 정보가 포함된 ExoPlayer용 전체 SMB URI를 생성함.
      * 
-     * @param serverIp 서버 IP.
-     * @param username 사용자 이름.
-     * @param password 비밀번호.
-     * @param filePath 파일 경로.
-     * @return 인증 정보가 포함된 Uri.
+     * @param serverIp 서버 IP 주소.
+     * @param username 인코딩할 사용자 이름.
+     * @param password 인코딩할 비밀번호.
+     * @param filePath 서버 내 파일 상대 경로.
+     * @return 인증 정보가 URL에 포함된 Uri 객체.
      */
     fun getAuthenticatedUri(serverIp: String, username: String, password: String, filePath: String): Uri {
-        val builder = Uri.Builder()
-            .scheme("smb")
-        
-        // 사용자 이름과 비밀번호를 각각 인코딩하여 authority 구성
+        val builder = Uri.Builder().scheme("smb")
         if (username.isNotBlank()) {
             val encodedUser = Uri.encode(username)
             val encodedPass = Uri.encode(password)
@@ -117,44 +123,44 @@ class SmbService {
         } else {
             builder.authority(serverIp)
         }
-        
-        // 경로의 각 세그먼트를 분리하여 추가함으로써 자동 인코딩 보장
         val segments = filePath.split("/").filter { it.isNotEmpty() }
         segments.forEach { builder.appendPath(it) }
-        
         return builder.build()
     }
 
     /**
-     * 지정된 서브넷 내의 SMB 서버들을 스캔함.
+     * 지정된 서브넷 내에서 활성화된 SMB 서버들을 병렬로 스캔함.
+     * 445번 포트 확인을 통해 실제 SMB 서비스를 제공하는 기기만 선별함.
      * 
-     * @param subnet 스캔할 서브넷 (예: "192.168.0").
-     * @return 발견된 서버 목록.
+     * @param subnet 스캔할 C-Class 서브넷 (예: "192.168.0").
+     * @return 응답이 있는 서버들의 [SmbServer] 리스트.
      */
     suspend fun scanNetwork(subnet: String): List<SmbServer> = withContext(Dispatchers.IO) {
-        val servers = mutableListOf<SmbServer>()
-        for (i in 1..254) {
-            val host = "$subnet.$i"
-            try {
-                val address = InetAddress.getByName(host)
-                if (address.isReachable(100)) {
-                    servers.add(SmbServer(address.hostName, host))
+        (1..254).map { i ->
+            async {
+                val host = "$subnet.$i"
+                try {
+                    // SMB 포트(445)에 접속 시도하여 실제 서비스 확인 (타임아웃 200ms)
+                    val socket = Socket()
+                    socket.connect(InetSocketAddress(host, 445), 200)
+                    val address = socket.inetAddress
+                    socket.close()
+                    SmbServer(address.hostName, host)
+                } catch (e: Exception) {
+                    null
                 }
-            } catch (e: Exception) {
-                // 스캔 중 오류는 무시함
             }
-        }
-        servers
+        }.awaitAll().filterNotNull()
     }
 
-    // 재생 가능한 비디오 확장자 목록
+    /** 지원하는 비디오 확장자 목록. */
     private val videoExtensions = listOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts")
 
     /**
-     * 지정된 경로의 파일 및 폴더 목록을 조회함. 폴더와 비디오 파일만 필터링하여 반환.
+     * 지정된 SMB 경로 내의 파일 및 폴더 목록을 조회함.
      * 
-     * @param path 조회할 SMB 경로.
-     * @return 아이템 목록.
+     * @param path 조회할 SMB URI 경로.
+     * @return [SmbItem] 객체 리스트.
      */
     suspend fun listFiles(path: String): List<SmbItem> = withContext(Dispatchers.IO) {
         try {

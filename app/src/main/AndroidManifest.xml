@@ -19,7 +19,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VP"
         android:enableOnBackInvokedCallback="true"
-        android:largeHeap="true"
         tools:targetApi="34">
         
         <activity

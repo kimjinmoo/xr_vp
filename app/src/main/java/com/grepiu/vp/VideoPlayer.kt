@@ -25,8 +25,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -34,8 +38,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -90,6 +92,7 @@ fun VideoPlayer(
     strings: UiStrings,
     onResizeWindowRequest: (Int, Int) -> Unit = { _, _ -> },
     onToggleFullscreen: () -> Unit = {},
+    onClose: () -> Unit = {},
     isFullscreen: Boolean = false,
     playerViewModel: PlayerViewModel = viewModel()
 ) {
@@ -99,6 +102,7 @@ fun VideoPlayer(
     val isPlaying = playerViewModel.isPlaying
     val duration = playerViewModel.duration
     val currentPosition = playerViewModel.currentPosition
+    val bufferedPosition = playerViewModel.bufferedPosition
     val videoWidth = playerViewModel.videoWidth
     val videoHeight = playerViewModel.videoHeight
     val isBuffering = playerViewModel.isBuffering
@@ -112,7 +116,10 @@ fun VideoPlayer(
         val listener = object : Player.Listener {
             override fun onRenderedFirstFrame() { isFirstFrameReady = true }
             override fun onPlayerError(error: PlaybackException) {
-                playbackError = "재생 중 오류가 발생했습니다: ${error.localizedMessage}"
+                Log.e("VP_FATAL", "재생 중 치명적 오류 발생 (리소스 해제): ${error.errorCodeName}", error)
+                playbackError = error.localizedMessage ?: error.errorCodeName
+                // 에러 발생 시 즉시 플레이어를 해제하여 로그 폭주 및 리소스 낭비를 차단함
+                playerViewModel.releasePlayer()
             }
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
@@ -131,10 +138,12 @@ fun VideoPlayer(
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) {
+    // 재생 중이 아니더라도 버퍼링 상태 등 프로그레스를 주기적으로 업데이트함 (0.1초 주기)
+    // 에러 발생 시에는 업데이트를 중단하여 로그 폭주 및 불필요한 리렌더링 방지
+    LaunchedEffect(Unit, playbackError) {
+        while (playbackError == null) {
             playerViewModel.updateProgress()
-            delay(500)
+            delay(100)
         }
     }
 
@@ -153,7 +162,7 @@ fun VideoPlayer(
     SideEffect { exoPlayer.volume = volume }
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (videoUri != null) {
+        if (videoUri != null && playbackError == null) {
             Box(
                 modifier = Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
                     controlsVisible = !controlsVisible
@@ -182,7 +191,7 @@ fun VideoPlayer(
                 )
 
                 // 영상 준비 중이거나 버퍼링 중일 때 로딩 바 표시
-                if (videoUri != null && (!isFirstFrameReady || isBuffering)) {
+                if (!isFirstFrameReady || isBuffering) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -199,12 +208,21 @@ fun VideoPlayer(
 
                 AnimatedVisibility(visible = controlsVisible, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
                     Box(modifier = Modifier.fillMaxSize()) {
+                        // 상단 닫기 버튼 추가
+                        IconButton(
+                            onClick = onClose,
+                            modifier = Modifier.align(Alignment.TopStart).padding(16.dp).size(48.dp).background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.close, tint = Color.White)
+                        }
+
                         Column(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.5f)).padding(16.dp)) {
                             PlayerControls(
                                 exoPlayer = exoPlayer,
                                 isPlaying = isPlaying,
                                 duration = duration,
                                 currentPosition = currentPosition,
+                                bufferedPosition = bufferedPosition,
                                 volume = volume,
                                 showVolumeBar = showVolumeBar,
                                 isFullscreen = isFullscreen,
@@ -224,10 +242,23 @@ fun VideoPlayer(
         }
     }
 
-    if (showInfo) VideoInfoDialog(exoPlayer = exoPlayer, videoUri = videoUri, onDismiss = { showInfo = false })
+    if (showInfo) VideoInfoDialog(exoPlayer = exoPlayer, videoUri = videoUri, playerViewModel = playerViewModel, strings = strings, onDismiss = { showInfo = false })
     
     if (playbackError != null) {
-        AlertDialog(onDismissRequest = { playbackError = null }, title = { Text(strings.playbackError) }, text = { Text(playbackError!!) }, confirmButton = { TextButton(onClick = { playbackError = null }) { Text("확인") } })
+        AlertDialog(
+            onDismissRequest = { 
+                playbackError = null 
+                onClose()
+            },
+            title = { Text(strings.playbackError) },
+            text = { Text(strings.playbackErrorPrefix + playbackError!!) },
+            confirmButton = { 
+                TextButton(onClick = { 
+                    playbackError = null 
+                    onClose()
+                }) { Text(strings.confirm) } 
+            }
+        )
     }
 }
 
@@ -237,6 +268,7 @@ fun PlayerControls(
     isPlaying: Boolean,
     duration: Long,
     currentPosition: Long,
+    bufferedPosition: Long,
     volume: Float,
     showVolumeBar: Boolean,
     isFullscreen: Boolean,
@@ -246,6 +278,7 @@ fun PlayerControls(
     onInfoShow: () -> Unit
 ) {
     val progress = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f
+    val bufferedProgress = if (duration > 0) bufferedPosition.toFloat() / duration.toFloat() else 0f
     
     Column {
         Box(
@@ -263,8 +296,13 @@ fun PlayerControls(
             Canvas(modifier = Modifier.fillMaxWidth().height(4.dp)) {
                 val width = size.width
                 val centerY = size.height / 2
+                // 전체 트랙 (배경)
                 drawLine(color = Color.White.copy(alpha = 0.2f), start = Offset(0f, centerY), end = Offset(width, centerY), strokeWidth = 3.dp.toPx())
+                // 버퍼링 진행 트랙
+                drawLine(color = Color.White.copy(alpha = 0.4f), start = Offset(0f, centerY), end = Offset(width * bufferedProgress, centerY), strokeWidth = 3.dp.toPx())
+                // 현재 재생 진행 트랙
                 drawLine(color = Color.Red, start = Offset(0f, centerY), end = Offset(width * progress, centerY), strokeWidth = 3.dp.toPx())
+                // 재생 위치 노브 (Circle)
                 drawCircle(color = Color.Red, radius = 6.dp.toPx(), center = Offset(width * progress, centerY))
             }
         }
@@ -284,7 +322,7 @@ fun PlayerControls(
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AnimatedVisibility(visible = showVolumeBar) { Slider(value = volume, onValueChange = onVolumeChange, modifier = Modifier.width(100.dp).padding(end = 8.dp)) }
-                    IconButton(onClick = onToggleVolumeBar) { Icon(if (volume > 0) Icons.Default.VolumeUp else Icons.Default.VolumeOff, null, tint = Color.White) }
+                    IconButton(onClick = onToggleVolumeBar) { Icon(if (volume > 0) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff, null, tint = Color.White) }
                 }
                 IconButton(onClick = onFullscreenToggle) { Icon(if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen, null, tint = Color.White) }
                 IconButton(onClick = onInfoShow) { Icon(Icons.Default.Info, null, tint = Color.White) }
@@ -304,10 +342,10 @@ private fun formatTime(ms: Long): String {
 
 @OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun VideoInfoDialog(exoPlayer: ExoPlayer, videoUri: Uri?, onDismiss: () -> Unit) {
+fun VideoInfoDialog(exoPlayer: ExoPlayer, videoUri: Uri?, playerViewModel: PlayerViewModel, strings: UiStrings, onDismiss: () -> Unit) {
     val videoFormat = exoPlayer.videoFormat
     val audioFormat = exoPlayer.audioFormat
-    val fileName = remember(videoUri) { videoUri?.lastPathSegment ?: "Unknown File" }
+    val fileName = remember(videoUri) { videoUri?.lastPathSegment ?: strings.unknownFile }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -318,7 +356,7 @@ fun VideoInfoDialog(exoPlayer: ExoPlayer, videoUri: Uri?, onDismiss: () -> Unit)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text("Media Information", style = MaterialTheme.typography.headlineSmall)
+                    Text(strings.mediaInfoTitle, style = MaterialTheme.typography.headlineSmall)
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(text = fileName, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -328,26 +366,35 @@ fun VideoInfoDialog(exoPlayer: ExoPlayer, videoUri: Uri?, onDismiss: () -> Unit)
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)), shape = RoundedCornerShape(16.dp)) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("VIDEO TRACK", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Text(strings.videoTrack, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(8.dp))
-                        InfoRow("Resolution", "${videoFormat?.width ?: 0} x ${videoFormat?.height ?: 0}")
-                        InfoRow("Codec", videoFormat?.sampleMimeType?.substringAfter("/")?.uppercase() ?: "Unknown")
-                        InfoRow("Frame Rate", "${videoFormat?.frameRate ?: 0f} fps")
-                        InfoRow("Bitrate", "${(videoFormat?.bitrate ?: 0) / 1000} kbps")
+                        InfoRow(strings.resolution, "${videoFormat?.width ?: 0} x ${videoFormat?.height ?: 0}")
+                        InfoRow(strings.codec, videoFormat?.sampleMimeType?.substringAfter("/")?.uppercase() ?: strings.unknownValue)
+                        InfoRow(strings.frameRate, "${videoFormat?.frameRate ?: 0f} fps")
+                        InfoRow(strings.bitrate, "${(videoFormat?.bitrate ?: 0) / 1000} kbps")
                     }
                 }
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)), shape = RoundedCornerShape(16.dp)) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("AUDIO TRACK", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+                        Text(strings.audioTrack, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.height(8.dp))
-                        InfoRow("Codec", audioFormat?.sampleMimeType?.substringAfter("/")?.uppercase() ?: "Unknown")
-                        InfoRow("Channels", "${audioFormat?.channelCount ?: 0} ch")
-                        InfoRow("Sample Rate", "${(audioFormat?.sampleRate ?: 0) / 1000} kHz")
+                        InfoRow(strings.codec, audioFormat?.sampleMimeType?.substringAfter("/")?.uppercase() ?: strings.unknownValue)
+                        InfoRow(strings.channels, "${audioFormat?.channelCount ?: 0} ch")
+                        InfoRow(strings.sampleRate, "${(audioFormat?.sampleRate ?: 0) / 1000} kHz")
+                    }
+                }
+                Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)), shape = RoundedCornerShape(16.dp)) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(strings.networkCache, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        InfoRow(strings.downloadSpeed, String.format(Locale.US, "%.2f Mbps", playerViewModel.currentBandwidth / 1_000_000f))
+                        InfoRow(strings.bufferedSize, String.format(Locale.US, "%.2f MB", playerViewModel.bufferedPosition / (1024f * 1024f)))
+                        InfoRow(strings.heapUsage, String.format(Locale.US, "%d / %d MB", playerViewModel.currentHeapUsage / (1024 * 1024), playerViewModel.maxHeapMemory / (1024 * 1024)))
                     }
                 }
             }
         },
-        confirmButton = { Button(onClick = onDismiss, shape = RoundedCornerShape(12.dp)) { Text("Close") } }
+        confirmButton = { Button(onClick = onDismiss, shape = RoundedCornerShape(12.dp)) { Text(strings.close) } }
     )
 }
 
