@@ -21,7 +21,9 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import androidx.media3.exoplayer.upstream.BandwidthMeter
 import androidx.media3.common.Timeline
 import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.source.MediaSource
@@ -32,12 +34,15 @@ import androidx.media3.exoplayer.source.TrackGroupArray
 import androidx.media3.exoplayer.trackselection.ExoTrackSelection
 import androidx.media3.common.TrackGroup
 import androidx.media3.exoplayer.trackselection.TrackSelection
+import androidx.media3.datasource.TransferListener
+import androidx.media3.datasource.DataSpec
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.media3.common.VideoSize
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 비디오 플레이어의 인스턴스와 재생 상태를 관리하는 ViewModel.
@@ -51,6 +56,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var currentUri: Uri? = null
     private var bandwidthMeter: DefaultBandwidthMeter? = null
     private var wifiLock: WifiManager.WifiLock? = null
+
+    // 실시간 대역폭 측정을 위한 수동 카운터
+    private val totalBytesTransferred = AtomicLong(0)
+    private var lastMeasuredBytes = 0L
+    private var lastMeasuredTime = 0L
 
     init {
         val wifiManager = application.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -74,6 +84,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     var videoHeight by mutableStateOf(1080)
     var isBuffering by mutableStateOf(false)
 
+    // 전송 바이트를 실시간으로 누적하는 리스너
+    private val manualTransferListener = object : TransferListener {
+        override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+        override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+        override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+            totalBytesTransferred.addAndGet(bytesTransferred.toLong())
+        }
+        override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {}
+    }
+
     fun getOrCreatePlayer(context: Context): ExoPlayer {
         if (exoPlayer == null) {
             val customMediaCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -93,6 +113,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 setMediaCodecSelector(customMediaCodecSelector)
             }
 
+            // BandwidthMeter 설정 (ExoPlayer 내부 로직용)
             val meter = DefaultBandwidthMeter.Builder(context)
                 .setInitialBitrateEstimate(200_000_000L)
                 .build()
@@ -100,17 +121,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
             val allocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
 
-            val baseLoadControl = DefaultLoadControl.Builder()
+            val loadControl = DefaultLoadControl.Builder()
                 .setAllocator(allocator)
-                .setBufferDurationsMs(30000, 120000, 2500, 5000)
+                .setBufferDurationsMs(60_000, 120_000, 5_000, 10_000)
                 .setTargetBufferBytes(256 * 1024 * 1024)
-                .setBackBuffer(10000, true)
-                .setPrioritizeTimeOverSizeThresholds(false)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBackBuffer(10_000, true)
                 .build()
 
             exoPlayer = ExoPlayer.Builder(context, renderersFactory)
                 .setBandwidthMeter(meter)
-                .setLoadControl(baseLoadControl)
+                .setLoadControl(loadControl)
                 .build().apply {
                     addListener(object : Player.Listener {
                         override fun onIsPlayingChanged(playing: Boolean) { this@PlayerViewModel.isPlaying = playing }
@@ -129,11 +150,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     })
                 }
+            
+            // 측정 상태 초기화
+            lastMeasuredBytes = 0L
+            lastMeasuredTime = System.currentTimeMillis()
+            totalBytesTransferred.set(0)
         }
         return exoPlayer!!
     }
 
+    /**
+     * UI 스레드에서 주기적으로 호출됨 (약 500ms~1s 주기)
+     */
     fun updateProgress() {
+        val now = System.currentTimeMillis()
         exoPlayer?.let {
             currentPosition = it.currentPosition
             bufferedPosition = it.bufferedPosition
@@ -151,7 +181,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 if (wifiLock?.isHeld == true) wifiLock?.release()
             }
         }
-        bandwidthMeter?.let { currentBandwidth = it.bitrateEstimate }
+
+        // 실시간 초당 전송 속도 계산 (Bits per second)
+        val currentTotalBytes = totalBytesTransferred.get()
+        val timeDiff = now - lastMeasuredTime
+        if (timeDiff >= 500) { // 최소 500ms 주기로 계산
+            val byteDiff = currentTotalBytes - lastMeasuredBytes
+            if (byteDiff >= 0) {
+                val bps = (byteDiff * 8000) / timeDiff
+                this.currentBandwidth = bps
+                Log.d("VP_NET", "Instantaneous Speed: ${bps / 1_000_000.0} Mbps")
+            }
+            lastMeasuredBytes = currentTotalBytes
+            lastMeasuredTime = now
+        }
     }
 
     fun prepareVideo(context: Context, uri: Uri, force: Boolean = false) {
@@ -161,19 +204,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
         Log.d("VP_DEBUG", "Preparing Video: ${Uri.decode(uri.toString())} (force=$force)")
         currentUri = uri
+        
+        // 데이터 전송량 카운터 초기화
+        totalBytesTransferred.set(0)
+        lastMeasuredBytes = 0
+        lastMeasuredTime = System.currentTimeMillis()
+        currentBandwidth = 0
+
         player.stop()
         player.clearMediaItems()
-        val dataSourceFactory = if (uri.scheme?.lowercase() == "smb") SmbDataSourceFactory() else DefaultDataSource.Factory(context)
-        val mediaSource = DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory).createMediaSource(MediaItem.fromUri(uri))
+
+        // SmbDataSourceFactory에 수동 리스너와 BandwidthMeter 모두 등록
+        val dataSourceFactory = if (uri.scheme?.lowercase() == "smb") {
+            // 가변 인자로 여러 리스너 전달 가능
+            SmbDataSourceFactory(manualTransferListener, bandwidthMeter)
+        } else {
+            DefaultDataSource.Factory(context)
+        }
+        
+        val mediaSource = DefaultMediaSourceFactory(context)
+            .setDataSourceFactory(dataSourceFactory)
+            .createMediaSource(MediaItem.fromUri(uri))
+            
         player.setMediaSource(mediaSource)
         player.prepare()
         player.playWhenReady = true
     }
 
-    /**
-     * 플레이어 리소스를 완전히 해제하고 인스턴스를 초기화함.
-     * 치명적 에러 발생 시 또는 화면 종료 시 호출됨.
-     */
     fun releasePlayer() {
         if (wifiLock?.isHeld == true) wifiLock?.release()
         exoPlayer?.let {
@@ -183,6 +240,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
         exoPlayer = null
         currentUri = null
+        totalBytesTransferred.set(0)
         Log.d("VP_DEBUG", "Player released and nullified")
     }
 
