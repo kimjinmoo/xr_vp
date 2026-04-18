@@ -3,11 +3,13 @@ package com.grepiu.vp
 import android.content.Context
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import org.jupnp.DefaultUpnpServiceConfiguration
 import org.jupnp.UpnpService
 import org.jupnp.UpnpServiceImpl
 import org.jupnp.model.action.ActionInvocation
@@ -21,6 +23,8 @@ import org.jupnp.registry.Registry
 import org.jupnp.support.contentdirectory.callback.Browse
 import org.jupnp.support.model.BrowseFlag
 import org.jupnp.support.model.DIDLContent
+import java.net.InetAddress
+import java.net.NetworkInterface
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -52,24 +56,37 @@ class DlnaService(private val context: Context) {
     fun start() {
         if (upnpService == null) {
             try {
+                Log.d("DLNA_SERVICE", "Starting jUPnP service...")
                 // 안드로이드에서 멀티캐스트 패킷 수신을 위해 Lock 획득 필수
                 val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                 multicastLock = wifiManager.createMulticastLock("jupnp_lock").apply {
                     setReferenceCounted(true)
                     acquire()
                 }
+                Log.d("DLNA_SERVICE", "Multicast lock acquired")
                 
+                // jUPnP 2.7.0 기본 설정 사용 (안드로이드 이슈 대응을 위해 최소화된 시작)
                 upnpService = UpnpServiceImpl()
+                Log.d("DLNA_SERVICE", "jUPnP service instance created")
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("DLNA_SERVICE", "Failed to start jUPnP service", e)
             }
         }
+    }
+
+    /**
+     * 현재 네트워크에서 장치 검색을 다시 시도함.
+     */
+    fun search() {
+        Log.d("DLNA_SERVICE", "Triggering manual search...")
+        upnpService?.controlPoint?.search()
     }
 
     /**
      * UPnP 서비스를 종료함.
      */
     fun stop() {
+        Log.d("DLNA_SERVICE", "Stopping jUPnP service...")
         upnpService?.shutdown()
         upnpService = null
         
@@ -78,7 +95,7 @@ class DlnaService(private val context: Context) {
                 if (it.isHeld) it.release()
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("DLNA_SERVICE", "Error releasing multicast lock", e)
         }
         multicastLock = null
     }
@@ -90,6 +107,7 @@ class DlnaService(private val context: Context) {
         val devices = mutableListOf<DlnaDevice>()
         val listener = object : DefaultRegistryListener() {
             override fun remoteDeviceAdded(registry: Registry, device: RemoteDevice) {
+                Log.d("DLNA_SERVICE", "Remote device added: ${device.details.friendlyName}")
                 if (device.findService(UDAServiceType("ContentDirectory")) != null) {
                     val dlnaDevice = DlnaDevice(device.details.friendlyName, device.identity.udn.toString(), device)
                     if (devices.none { it.udn == dlnaDevice.udn }) {
@@ -100,6 +118,7 @@ class DlnaService(private val context: Context) {
             }
 
             override fun remoteDeviceRemoved(registry: Registry, device: RemoteDevice) {
+                Log.d("DLNA_SERVICE", "Remote device removed: ${device.identity.udn.toString()}")
                 devices.removeAll { it.udn == device.identity.udn.toString() }
                 trySend(devices.toList())
             }
@@ -119,9 +138,10 @@ class DlnaService(private val context: Context) {
         trySend(devices.toList())
         
         // 주기적으로 검색 시도
-        upnpService?.controlPoint?.search()
+        search()
 
         awaitClose {
+            Log.d("DLNA_SERVICE", "Stopping devices observation")
             upnpService?.registry?.removeListener(listener)
         }
     }

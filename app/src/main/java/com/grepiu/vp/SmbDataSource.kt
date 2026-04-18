@@ -12,6 +12,8 @@ import jcifs.config.PropertyConfiguration
 import jcifs.context.BaseContext
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
+import jcifs.smb.SmbRandomAccessFile
+import java.io.BufferedInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.URLDecoder
@@ -26,7 +28,20 @@ import kotlin.math.min
 class SmbDataSource : BaseDataSource(true) {
     private var uri: Uri? = null
     private var inputStream: InputStream? = null
+    private var randomAccessFile: SmbRandomAccessFile? = null
     private var bytesToRead: Long = 0
+
+    /**
+     * SmbRandomAccessFile을 InputStream으로 변환해주는 내부 어댑터 클래스.
+     */
+    private class SmbInputStream(private val raf: SmbRandomAccessFile) : InputStream() {
+        override fun read(): Int {
+            val b = ByteArray(1)
+            return if (raf.read(b) <= 0) -1 else b[0].toInt() and 0xFF
+        }
+        override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
+        override fun close() = raf.close()
+    }
 
     /**
      * jcifs-ng 설정을 위한 컨텍스트 생성.
@@ -42,12 +57,12 @@ class SmbDataSource : BaseDataSource(true) {
         prop.setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
         prop.setProperty("jcifs.smb.client.dfs.disabled", "true")
         
-        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (8MB) - 고비트레이트 대응
-        prop.setProperty("jcifs.smb.client.rcv_buf_size", "8388608") 
-        prop.setProperty("jcifs.smb.client.snd_buf_size", "8388608")
+        // 네트워크 읽기/쓰기 버퍼 대폭 확장 (16MB) - 초고비트레이트 대응
+        prop.setProperty("jcifs.smb.client.rcv_buf_size", "16777216") 
+        prop.setProperty("jcifs.smb.client.snd_buf_size", "16777216")
         // SMB2/3 프로토콜에서의 최대 읽기/쓰기 크기 상향
-        prop.setProperty("jcifs.smb.client.smb2.maxRead", "8388608")
-        prop.setProperty("jcifs.smb.client.smb2.maxWrite", "8388608")
+        prop.setProperty("jcifs.smb.client.smb2.maxRead", "16777216")
+        prop.setProperty("jcifs.smb.client.smb2.maxWrite", "16777216")
         // 동시 요청 버퍼 수 증가
         prop.setProperty("jcifs.smb.client.maxBuffers", "128")
         
@@ -73,7 +88,6 @@ class SmbDataSource : BaseDataSource(true) {
         transferInitializing(dataSpec)
 
         return try {
-            // ... (인증 처리 로직 생략)
             val encodedUserInfo = uri?.encodedUserInfo
             val context: CIFSContext
             val smbFile: SmbFile
@@ -160,25 +174,16 @@ class SmbDataSource : BaseDataSource(true) {
             }
             
             val fileLength = smbFile.length()
-            val rawInputStream = smbFile.openInputStream()
             
+            // SmbRandomAccessFile을 사용하여 물리적 seek 수행 (기존 skip 방식 대비 압도적 빠름)
+            val raf = SmbRandomAccessFile(smbFile, "r")
+            randomAccessFile = raf
             if (dataSpec.position > 0) {
-                var totalSkipped = 0L
-                while (totalSkipped < dataSpec.position) {
-                    val skipped = rawInputStream.skip(dataSpec.position - totalSkipped)
-                    if (skipped <= 0) {
-                        val tempBuffer = ByteArray(min(8192, (dataSpec.position - totalSkipped).toInt()))
-                        val read = rawInputStream.read(tempBuffer)
-                        if (read == -1) break
-                        totalSkipped += read
-                    } else {
-                        totalSkipped += skipped
-                    }
-                }
+                raf.seek(dataSpec.position)
             }
 
-            // 8K 영상 대응을 위해 자바 I/O 버퍼를 8MB로 확장
-            inputStream = java.io.BufferedInputStream(rawInputStream, 8 * 1024 * 1024)
+            // JNI 및 네트워크 호출 오버헤드를 줄이기 위해 2MB 수준의 완충 버퍼 적용
+            inputStream = BufferedInputStream(SmbInputStream(raf), 2 * 1024 * 1024)
 
             bytesToRead = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length

@@ -51,6 +51,13 @@ class DlnaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * DLNA 장치 검색을 다시 시도함.
+     */
+    fun refreshDiscovery() {
+        dlnaService.search()
+    }
+
+    /**
      * 특정 DLNA 장치를 선택하여 브라우징을 시작함.
      */
     fun selectDevice(device: DlnaDevice) {

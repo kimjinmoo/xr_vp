@@ -72,10 +72,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 .setLoadControl(
                     DefaultLoadControl.Builder()
                         .setBufferDurationsMs(
-                            30000,  // 최소 버퍼 30초
+                            60000,  // 최소 버퍼 60초 (초고비트레이트 대응)
                             120000, // 최대 버퍼 120초
-                            5000,   // 재생 시작을 위한 최소 버퍼 5초
-                            10000   // 버퍼링 후 재개 시 최소 버퍼 10초
+                            10000,  // 재생 시작을 위한 최소 버퍼 10초
+                            20000   // 버퍼링 후 재개 시 최소 버퍼 20초
                         )
                         .setPrioritizeTimeOverSizeThresholds(true)
                         .build()
