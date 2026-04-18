@@ -63,6 +63,8 @@ class SmbDataSource : BaseDataSource(true) {
         // SMB2/3 프로토콜에서의 최대 읽기/쓰기 크기 상향
         prop.setProperty("jcifs.smb.client.smb2.maxRead", "16777216")
         prop.setProperty("jcifs.smb.client.smb2.maxWrite", "16777216")
+        // TCP 통신 효율을 위해 지연(Nagle's algorithm) 비활성화
+        prop.setProperty("jcifs.smb.client.tcpNoDelay", "true")
         // 동시 요청 버퍼 수 증가
         prop.setProperty("jcifs.smb.client.maxBuffers", "128")
         
@@ -182,8 +184,8 @@ class SmbDataSource : BaseDataSource(true) {
                 raf.seek(dataSpec.position)
             }
 
-            // JNI 및 네트워크 호출 오버헤드를 줄이기 위해 2MB 수준의 완충 버퍼 적용
-            inputStream = BufferedInputStream(SmbInputStream(raf), 2 * 1024 * 1024)
+            // JNI 및 네트워크 호출 오버헤드를 줄이기 위해 16MB 수준의 완충 버퍼 적용 (maxRead와 일치)
+            inputStream = BufferedInputStream(SmbInputStream(raf), 16 * 1024 * 1024)
 
             bytesToRead = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
                 dataSpec.length

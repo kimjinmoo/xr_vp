@@ -77,6 +77,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             10000,  // 재생 시작을 위한 최소 버퍼 10초
                             20000   // 버퍼링 후 재개 시 최소 버퍼 20초
                         )
+                        .setTargetBufferBytes(256 * 1024 * 1024) // 256MB 강제 할당 (미리 읽기 극대화)
                         .setPrioritizeTimeOverSizeThresholds(true)
                         .build()
                 )
